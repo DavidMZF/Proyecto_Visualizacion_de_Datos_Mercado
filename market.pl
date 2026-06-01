@@ -212,7 +212,7 @@ my $last_configure_h = 0;
 
 $mw->bind('<Configure>', sub {
     my $new_w = $mw->width();
-    my $new_h = $mw->width();
+    my $new_h = $mw->height();
     return if $new_w == $last_configure_w && $new_h == $last_configure_h;
     $last_configure_w = $new_w;
     $last_configure_h = $new_h;
