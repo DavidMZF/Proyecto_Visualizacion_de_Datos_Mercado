@@ -22,7 +22,6 @@ El punto de entrada principal es `market.pl`.
 - `Market/Panels/PricePanel.pm`: render de velas + escala Y + último precio + crosshair.
 - `Market/Panels/ATRPanel.pm`: render línea ATR + escala Y + último valor + crosshair.
 - `Market/Panels/Scales.pm`: conversiones índice↔x y valor↔y y dibujo de escalas.
-- `Tareas/main.pl`: wrapper opcional que ejecuta `market.pl` desde una ruta estable.
 
 ---
 
