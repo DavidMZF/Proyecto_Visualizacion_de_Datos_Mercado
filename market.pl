@@ -108,10 +108,28 @@ $toolbar->Label(
     -font       => ['sans-serif', 9],
 )->pack(-side => 'left', -padx => 10);
 
-# Área de canvas — usamos un Frame sin propagación de scroll
+# Área de canvas
 my $chart_frame = $mw->Frame(
     -background => '#131722',
 )->pack(-side => 'top', -fill => 'both', -expand => 1);
+
+# ATR y separador se anclan al fondo primero.
+# canvas_price toma todo el espacio vertical restante con expand.
+# Si se hiciera al revés (price primero con expand), canvas_price consumiría
+# todo el frame y los widgets siguientes quedarían fuera del área visible.
+my $canvas_atr = $chart_frame->Canvas(
+    -width              => $WINDOW_W,
+    -height             => $ATR_H,
+    -background         => '#131722',
+    -relief             => 'flat',
+    -bd                 => 0,
+    -highlightthickness => 0,
+)->pack(-side => 'bottom', -fill => 'x');
+
+$chart_frame->Frame(
+    -background => '#2a2e39',
+    -height     => 1,
+)->pack(-side => 'bottom', -fill => 'x');
 
 my $canvas_price = $chart_frame->Canvas(
     -width              => $WINDOW_W,
@@ -121,20 +139,6 @@ my $canvas_price = $chart_frame->Canvas(
     -bd                 => 0,
     -highlightthickness => 0,
 )->pack(-side => 'top', -fill => 'both', -expand => 1);
-
-$chart_frame->Frame(
-    -background => '#2a2e39',
-    -height     => 1,
-)->pack(-side => 'top', -fill => 'x');
-
-my $canvas_atr = $chart_frame->Canvas(
-    -width              => $WINDOW_W,
-    -height             => $ATR_H,
-    -background         => '#131722',
-    -relief             => 'flat',
-    -bd                 => 0,
-    -highlightthickness => 0,
-)->pack(-side => 'top', -fill => 'x');
 
 # Barra de estado
 my $statusbar = $mw->Frame(
@@ -200,19 +204,30 @@ $toolbar->Button(
 )->pack(-side => 'left', -padx => 2);
 
 # ═══════════════════════════════════════════════════════════
-# 6. RESIZE — solo disparar cuando cambia el ancho real
+# 6. RESIZE — disparar cuando cambia ancho o alto
 # ═══════════════════════════════════════════════════════════
 
 my $last_configure_w = 0;
+my $last_configure_h = 0;
 
 $mw->bind('<Configure>', sub {
     my $new_w = $mw->width();
-    return if $new_w == $last_configure_w;
+    my $new_h = $mw->width();
+    return if $new_w == $last_configure_w && $new_h == $last_configure_h;
     $last_configure_w = $new_w;
+    $last_configure_h = $new_h;
 
     $engine->{canvas_w}                  = $new_w;
     $engine->{scale_price}{canvas_width} = $new_w;
     $engine->{scale_atr}{canvas_width}   = $new_w;
+
+    # Propagar la nueva altura del panel de precio al engine
+    my $new_price_h = $canvas_price->height();
+    if ($new_price_h > 10) {
+        $engine->{canvas_price_h}             = $new_price_h;
+        $engine->{scale_price}{canvas_height} = $new_price_h;
+    }
+
     $engine->request_render();
 });
 

@@ -142,9 +142,13 @@ sub render {
 
     my $bar_w = $scale->bar_width();
 
+    print STDERR
+        "[DRAW] bar_width=$bar_w\n";
+
     # Ancho del cuerpo: 80% del ancho de barra, mínimo 1px
-    my $body_w = $bar_w * 0.8;
-    $body_w    = 1 if $body_w < 1;
+    my $body_w = $bar_w;
+
+    $body_w *= 0.95 if $bar_w > 3;
 
     my $start_index = $scale->{offset};
 

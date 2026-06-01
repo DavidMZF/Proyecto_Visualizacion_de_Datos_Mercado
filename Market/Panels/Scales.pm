@@ -10,6 +10,7 @@ sub new {
         margin_right  => $args{margin_right}  // 60,
         margin_bottom => $args{margin_bottom} // 20,
         visible_bars  => $args{visible_bars}  // 100,
+        right_padding_bars => $args{right_padding_bars}  // 8,
         offset        => $args{offset}        // 0,
         y_min         => $args{y_min}         // 0,
         y_max         => $args{y_max}         // 1,
@@ -34,7 +35,7 @@ sub plot_height {
 sub bar_width {
     my ($self) = @_;
     my $pw = $self->plot_width();
-    return $pw / $self->{visible_bars};
+    return $pw /($self->{visible_bars} + $self->{right_padding_bars});
 }
 
 # Aliases con guion bajo para compatibilidad interna

@@ -74,18 +74,12 @@ sub update_last {
             # Fase de acumulación: guardar TRs hasta tener `period` valores
             push @{ $self->{tr_buffer} }, $tr;
 
-            if ( scalar @{ $self->{tr_buffer} } >= $period ) {
-
-                # Inicialización: SMA de los primeros `period` TRs
+            # CORRECCIÓN: eliminar el for, los undef ya fueron insertados en el else
+            if (scalar @{ $self->{tr_buffer} } >= $period) {
                 my $sum = 0;
                 $sum += $_ for @{ $self->{tr_buffer} };
                 my $atr_init = $sum / $period;
-
-                # Rellenar con undef las velas anteriores al primer ATR válido
-                for ( 1 .. $period - 1 ) {
-                    push @{ $self->{values} }, undef;
-                }
-                push @{ $self->{values} }, $atr_init;
+                push @{ $self->{values} }, $atr_init;   # ← solo este push
                 $self->{initialized} = 1;
             }
             else {
