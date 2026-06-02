@@ -26,6 +26,8 @@ sub new {
 
         visible_bars  => $args{visible_bars} // 100,
         offset        => 0,
+        
+        view_mode     => 'auto',                # 'auto' o 'manual'
         y_min_manual  => undef,
         y_max_manual  => undef,
         y_drag_start  => undef,
@@ -85,9 +87,6 @@ sub _init_panels {
     );
 }
 
-# ─── compute_window ───────────────────────────────────────────────────────────
-# offset=0  → última vela visible a la derecha
-# offset=N  → desplazado N velas hacia el pasado
 sub compute_window {
     my ($self) = @_;
     my $size = $self->{market_data}->size();
@@ -100,14 +99,11 @@ sub compute_window {
     my $end   = ($size - 1) - $self->{offset};
     my $start = $end - $self->{visible_bars} + 1;
 
-    # FIX Bug2: solo ajustamos $start. $end queda donde el offset lo dejó.
     if ($start < 0) {
         $start = 0;
     }
 
-    # Clamp de seguridad (no debería ser necesario, pero protege ante edge cases)
     $end = $size - 1 if $end >= $size;
-
     return ($start, $end);
 }
 
@@ -127,6 +123,29 @@ sub render {
     my $size = $self->{market_data}->size();
     return if $size == 0;
 
+    # ── NUEVO: REDIMENSIONAMIENTO RESPONSIVO Y DINÁMICO ──
+    # Leemos el tamaño físico real que el sistema operativo le asignó al Canvas estirado
+    my $current_w_price = $self->{canvas_price}->width;
+    my $current_h_price = $self->{canvas_price}->height;
+    my $current_w_atr   = $self->{canvas_atr}->width;
+    my $current_h_atr   = $self->{canvas_atr}->height;
+
+    # Evitamos procesar si la ventana aún no se despliega en pantalla (valores iniciales <= 1)
+    if ($current_w_price > 10 && $current_h_price > 10) {
+        $self->{scale_price}{canvas_width}  = $current_w_price;
+        $self->{scale_price}{canvas_height} = $current_h_price;
+    }
+    if ($current_w_atr > 10 && $current_h_atr > 10) {
+        $self->{scale_atr}{canvas_width}  = $current_w_atr;
+        $self->{scale_atr}{canvas_height} = $current_h_atr;
+    }
+
+    # Anclaje defensivo de pantallas
+    $self->{canvas_price}->xviewMoveto(0);
+    $self->{canvas_price}->yviewMoveto(0);
+    $self->{canvas_atr}->xviewMoveto(0);
+    $self->{canvas_atr}->yviewMoveto(0);
+
     my ($start, $end) = $self->compute_window();
 
     my $price_data = $self->{market_data}->get_slice($start, $end);
@@ -134,40 +153,55 @@ sub render {
 
     my $actual_bars = $end - $start + 1;
 
-    # Ambas escalas comparten la misma ventana temporal
     $self->{scale_price}{visible_bars} = $actual_bars;
     $self->{scale_price}{offset}       = $start;
 
     $self->{scale_atr}{visible_bars}   = $actual_bars;
     $self->{scale_atr}{offset}         = $start;
 
-    # ── Escala Y del panel de precios ────────────────────────────────────────
     my ($y_min, $y_max);
 
-    if (defined $self->{y_min_manual} && defined $self->{y_max_manual}) {
-        # Modo manual: el usuario fijó el rango con drag derecho
+    if ($self->{view_mode} eq 'manual') {
+        unless (defined $self->{y_min_manual} && defined $self->{y_max_manual}) {
+            ($self->{y_min_manual}, $self->{y_max_manual}) = $self->{price_panel}->get_y_range($price_data);
+        }
         $y_min = $self->{y_min_manual};
         $y_max = $self->{y_max_manual};
     } else {
-        # Autoscale: siempre relativo a las barras actualmente visibles.
-        # FIX Bug1: el zoom horizontal llega aquí (no congela y_min_manual).
         ($y_min, $y_max) = $self->{price_panel}->get_y_range($price_data);
+        $self->{y_min_manual} = undef;
+        $self->{y_max_manual} = undef;
     }
 
     $self->{scale_price}{y_min} = $y_min;
     $self->{scale_price}{y_max} = $y_max;
 
-    # ── Escala Y del ATR ─────────────────────────────────────────────────────
     my ($atr_min, $atr_max) = $self->{atr_panel}->get_y_range($atr_values);
     $self->{scale_atr}{y_min} = $atr_min;
     $self->{scale_atr}{y_max} = $atr_max;
 
-    # ── Render ───────────────────────────────────────────────────────────────
     $self->{price_panel}->render($self->{canvas_price}, $price_data, $self->{scale_price});
     $self->{atr_panel}->render($self->{canvas_atr}, $atr_values, $self->{scale_atr});
 
     my $timestamps = $self->compute_intraday_labels();
     $self->{price_panel}->draw_time_axis($self->{canvas_price}, $timestamps);
+
+    # Renderizado estricto del indicador de estado en pantalla
+    $self->{canvas_price}->delete('mode_status_indicator');
+    
+    my $text_to_show = $self->{view_mode} eq 'auto' 
+                       ? "ESC: ESCALA AUTOMÁTICA" 
+                       : "ESC: ESCALA MANUAL (Arrastre 2D habilitado)";
+    my $text_color   = $self->{view_mode} eq 'auto' ? '#00ff00' : '#ffa500';
+
+    $self->{canvas_price}->createText(
+        15, 15,
+        -text   => $text_to_show,
+        -fill   => $text_color,
+        -anchor => 'nw',
+        -font   => 'Helvetica 10 bold',
+        -tags   => 'mode_status_indicator'
+    );
 }
 
 sub _bind_all_canvas {
@@ -179,20 +213,33 @@ sub _bind_all_canvas {
 sub bind_events {
     my ($self) = @_;
 
-    my $drag_start_x      = undef;
-    my $drag_start_offset = undef;
+    my $drag_start_x       = undef;
+    my $drag_start_y       = undef;
+    my $drag_start_offset  = undef;
+    my $drag_base_y_min    = undef;
+    my $drag_base_y_max    = undef;
+
+    my $main_window = $self->{canvas_price}->toplevel;
 
     $self->_bind_all_canvas('<Enter>', sub {
         my $canvas = shift;
-        $canvas->focus();
+        $canvas->focusForce();
     });
 
-    # ── Drag horizontal (botón izquierdo) ────────────────────────────────────
+    # ── NUEVO: DETECTAR CAMBIOS DE TAMAÑO ESTRUCTURALES (RESPONSIVO) ──
+    # Cuando la ventana se maximiza o arrastra, fuerza un recalculo inmediato
+    $self->{canvas_price}->bind('<Configure>', sub { $self->request_render(); });
+    $self->{canvas_atr}->bind('<Configure>', sub { $self->request_render(); });
+
+    # Drag asistido
     $self->_bind_all_canvas('<ButtonPress-1>', [sub {
         my ($canvas, $x, $y) = @_;
-        $canvas->focus();
+        $canvas->focusForce();
         $drag_start_x      = $x;
+        $drag_start_y      = $y;
         $drag_start_offset = $self->{offset};
+        $drag_base_y_min   = $self->{scale_price}{y_min};
+        $drag_base_y_max   = $self->{scale_price}{y_max};
     }, Ev('x'), Ev('y')]);
 
     $self->_bind_all_canvas('<B1-Motion>', [sub {
@@ -200,42 +247,52 @@ sub bind_events {
         return unless defined $drag_start_x;
 
         my $bar_w = $self->{scale_price}->_bar_width();
-        return if $bar_w < 0.5;
+        if ($bar_w >= 0.5) {
+            my $delta_bars = int(($x - $drag_start_x) / $bar_w);
+            $self->{offset} = $drag_start_offset - $delta_bars;
 
-        my $delta_bars = int(($x - $drag_start_x) / $bar_w);
-        $self->{offset} = $drag_start_offset - $delta_bars;
+            my $size = $self->{market_data}->size();
+            $self->{offset} = 0         if $self->{offset} < 0;
+            $self->{offset} = $size - 1 if $self->{offset} > $size - 1;
+        }
 
-        my $size = $self->{market_data}->size();
-        $self->{offset} = 0         if $self->{offset} < 0;
-        $self->{offset} = $size - 1 if $self->{offset} > $size - 1;
+        if ($self->{view_mode} eq 'manual' && defined $drag_base_y_min) {
+            my $dy    = $y - $drag_start_y;
+            my $range = $drag_base_y_max - $drag_base_y_min;
+            my $ph    = $self->{scale_price}->plot_height();
+            
+            if ($ph > 0) {
+                my $price_shift = ($dy / $ph) * $range;
+                $self->{y_min_manual} = $drag_base_y_min - $price_shift;
+                $self->{y_max_manual} = $drag_base_y_max - $price_shift;
+            }
+        }
 
         $self->request_render();
     }, Ev('x'), Ev('y')]);
 
     $self->_bind_all_canvas('<ButtonRelease-1>', sub {
         $drag_start_x = undef;
+        $drag_start_y = undef;
     });
 
-    # ── Zoom horizontal (rueda del mouse) ────────────────────────────────────
+    # Rueda del ratón
     $self->_bind_all_canvas('<MouseWheel>', [sub {
         my ($canvas, $delta) = @_;
         $self->_horizontal_zoom($delta > 0 ? -1 : 1);
-        Tk::break();
+        $canvas->break;
     }, Ev('D')]);
 
-    $self->_bind_all_canvas('<Button-4>', sub {
-        $self->_horizontal_zoom(-1);
-        Tk::break();
-    });
-    $self->_bind_all_canvas('<Button-5>', sub {
-        $self->_horizontal_zoom(1);
-        Tk::break();
-    });
+    $self->_bind_all_canvas('<Button-4>', sub { my $c = shift; $self->_horizontal_zoom(-1); $c->break; });
+    $self->_bind_all_canvas('<Button-5>', sub { my $c = shift; $self->_horizontal_zoom(1);  $c->break; });
 
-    # ── Pan/zoom vertical (botón derecho) ────────────────────────────────────
+    # Click derecho
     $self->{canvas_price}->CanvasBind('<ButtonPress-3>', [sub {
         my ($canvas, $x, $y) = @_;
+        $canvas->focusForce();
+        $self->{view_mode}    = 'manual';
         $self->{y_drag_start} = $y;
+        $self->request_render();
     }, Ev('x'), Ev('y')]);
 
     $self->{canvas_price}->CanvasBind('<B3-Motion>', [sub {
@@ -246,42 +303,47 @@ sub bind_events {
         $self->{y_drag_start} = $y;
     }, Ev('x'), Ev('y')]);
 
-    # Doble-click derecho → reset autoscale
     $self->{canvas_price}->CanvasBind('<Double-ButtonPress-3>', sub {
-        $self->{y_min_manual} = undef;
-        $self->{y_max_manual} = undef;
-        $self->request_render();
+        $self->set_view_mode('auto');
     });
 
-    # Ctrl + rueda → zoom vertical
-    $self->{canvas_price}->CanvasBind('<Control-Button-4>', sub {
-        $self->_vertical_zoom(0.90);
-    });
-    $self->{canvas_price}->CanvasBind('<Control-Button-5>', sub {
-        $self->_vertical_zoom(1.10);
-    });
+    $self->{canvas_price}->CanvasBind('<Control-Button-4>', sub { my $c = shift; $self->{view_mode} = 'manual'; $self->_vertical_zoom(0.90); $c->break; });
+    $self->{canvas_price}->CanvasBind('<Control-Button-5>', sub { my $c = shift; $self->{view_mode} = 'manual'; $self->_vertical_zoom(1.10); $c->break; });
 
-    # ── Crosshair ────────────────────────────────────────────────────────────
     $self->_bind_all_canvas('<Motion>', [sub {
         my ($canvas, $x, $y) = @_;
         $self->_draw_crosshair_all($x, $y);
     }, Ev('x'), Ev('y')]);
 
-    # ── Teclado ──────────────────────────────────────────────────────────────
-    $self->{canvas_price}->bind('<Key-1>', sub { $self->set_timeframe('1');  });
-    $self->{canvas_price}->bind('<Key-5>', sub { $self->set_timeframe('5');  });
-    $self->{canvas_price}->bind('<Key-6>', sub { $self->set_timeframe('15'); });
-    $self->{canvas_price}->bind('<r>',     sub { $self->reset_view(); });
+    # Bindings Globales a nivel de Ventana Principal
+    $main_window->bind('<Key-1>', sub { $self->set_timeframe('1');  });
+    $main_window->bind('<Key-5>', sub { $self->set_timeframe('5');  });
+    $main_window->bind('<Key-6>', sub { $self->set_timeframe('15'); });
+    
+    $main_window->bind('<Key-a>', sub { $self->set_view_mode('auto'); });
+    $main_window->bind('<Key-A>', sub { $self->set_view_mode('auto'); });
+    
+    $main_window->bind('<Key-m>', sub { $self->set_view_mode('manual'); });
+    $main_window->bind('<Key-M>', sub { $self->set_view_mode('manual'); });
+    
+    $main_window->bind('<Key-r>', sub { $self->reset_view(); });
+    $main_window->bind('<Key-R>', sub { $self->reset_view(); });
 
-    $self->{canvas_price}->focus();
+    $self->{canvas_price}->focusForce();
 }
 
-# ─── _horizontal_zoom ────────────────────────────────────────────────────────
-# FIX Bug1: NO toca y_min_manual.
-# El autoscale en render() ajusta Y a las barras visibles automáticamente.
+sub set_view_mode {
+    my ($self, $mode) = @_;
+    $self->{view_mode} = $mode;
+    if ($mode eq 'auto') {
+        $self->{y_min_manual} = undef;
+        $self->{y_max_manual} = undef;
+    }
+    $self->request_render();
+}
+
 sub _horizontal_zoom {
     my ($self, $delta) = @_;
-
     my $factor   = $delta < 0 ? 0.90 : 1.10;
     my $new_bars = int($self->{visible_bars} * $factor);
     my $size     = $self->{market_data}->size();
@@ -290,18 +352,12 @@ sub _horizontal_zoom {
     $new_bars = $size if $new_bars > $size;
 
     return if $new_bars == $self->{visible_bars};
-
     $self->{visible_bars} = $new_bars;
     $self->request_render();
 }
 
-# ─── _vertical_drag ──────────────────────────────────────────────────────────
-# FIX Bug3: implementa PAN (desplazamiento) en lugar de zoom.
-# Drag hacia arriba ($dy < 0) → precios suben (el gráfico baja).
-# Drag hacia abajo ($dy > 0) → precios bajan (el gráfico sube).
 sub _vertical_drag {
     my ($self, $dy) = @_;
-
     my $scale = $self->{scale_price};
 
     unless (defined $self->{y_min_manual}) {
@@ -313,20 +369,14 @@ sub _vertical_drag {
     my $ph    = $scale->plot_height();
     return if $ph == 0;
 
-    # Convierte píxeles a unidades de precio y desplaza el rango
     my $price_shift = ($dy / $ph) * $range;
     $self->{y_min_manual} -= $price_shift;
     $self->{y_max_manual} -= $price_shift;
-
     $self->request_render();
 }
 
-# ─── _vertical_zoom ──────────────────────────────────────────────────────────
-# Zoom vertical centrado en el punto medio del rango actual.
-# Usado con Ctrl+Rueda.
 sub _vertical_zoom {
     my ($self, $factor) = @_;
-
     my $scale = $self->{scale_price};
 
     unless (defined $self->{y_min_manual}) {
@@ -338,10 +388,8 @@ sub _vertical_zoom {
     my $half = ($self->{y_max_manual} - $self->{y_min_manual}) / 2;
 
     $half *= $factor;
-
     $self->{y_min_manual} = $mid - $half;
     $self->{y_max_manual} = $mid + $half;
-
     $self->request_render();
 }
 
@@ -363,6 +411,7 @@ sub set_timeframe {
 sub reset_view {
     my ($self) = @_;
     $self->{offset}       = 0;
+    $self->{view_mode}    = 'auto';
     $self->{y_min_manual} = undef;
     $self->{y_max_manual} = undef;
     $self->{visible_bars} = 100;

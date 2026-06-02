@@ -95,6 +95,10 @@ $mw->geometry("${WINDOW_W}x${WINDOW_H}");
 $mw->configure(-background => '#131722');
 $mw->resizable(1, 1);
 
+# ── CAMBIO 1: MAXIMIZAR AUTOMÁTICAMENTE AL ARRANCAR ──
+# Esta es la instrucción nativa ideal para entornos Linux (Fedora/GNOME/WSLg)
+$mw->attributes('-zoomed' => 1);
+
 # Toolbar
 my $toolbar = $mw->Frame(
     -background => '#1e222d',
@@ -113,10 +117,8 @@ my $chart_frame = $mw->Frame(
     -background => '#131722',
 )->pack(-side => 'top', -fill => 'both', -expand => 1);
 
-# ATR y separador se anclan al fondo primero.
-# canvas_price toma todo el espacio vertical restante con expand.
-# Si se hiciera al revés (price primero con expand), canvas_price consumiría
-# todo el frame y los widgets siguientes quedarían fuera del área visible.
+# El orden de empaquetado actual es perfecto para el comportamiento elástico:
+# ATR se queda abajo fijo, y el Canvas de Precios se estira en todo el espacio sobrante.
 my $canvas_atr = $chart_frame->Canvas(
     -width              => $WINDOW_W,
     -height             => $ATR_H,
@@ -169,6 +171,18 @@ my $engine = Market::ChartEngine->new(
     visible_bars   => 100,
 );
 
+# Nota: Los binds individuales aquí siguen siendo válidos, pero recuerda que el 
+# nuevo ChartEngine los gestiona de manera global y robusta internamente.
+$mw->bind('<Key-1>', sub { $engine->set_timeframe('1');  });
+$mw->bind('<Key-5>', sub { $engine->set_timeframe('5');  });
+$mw->bind('<Key-6>', sub { $engine->set_timeframe('15'); });
+$mw->bind('<Key-a>', sub { $engine->set_view_mode('auto');   });
+$mw->bind('<Key-A>', sub { $engine->set_view_mode('auto');   });
+$mw->bind('<Key-m>', sub { $engine->set_view_mode('manual'); });
+$mw->bind('<Key-M>', sub { $engine->set_view_mode('manual'); });
+$mw->bind('<Key-r>', sub { $engine->reset_view(); });
+$mw->bind('<Key-R>', sub { $engine->reset_view(); });
+
 # ═══════════════════════════════════════════════════════════
 # 5. BOTONES DE TIMEFRAME
 # ═══════════════════════════════════════════════════════════
@@ -204,7 +218,7 @@ $toolbar->Button(
 )->pack(-side => 'left', -padx => 2);
 
 # ═══════════════════════════════════════════════════════════
-# 6. RESIZE — disparar cuando cambia ancho o alto
+# 6. RESIZE — CAMBIO 2: OPTIMIZACIÓN RESPONSIVA
 # ═══════════════════════════════════════════════════════════
 
 my $last_configure_w = 0;
@@ -213,21 +227,15 @@ my $last_configure_h = 0;
 $mw->bind('<Configure>', sub {
     my $new_w = $mw->width();
     my $new_h = $mw->height();
+    
+    # Si las dimensiones no han cambiado realmente, ignoramos el evento
     return if $new_w == $last_configure_w && $new_h == $last_configure_h;
     $last_configure_w = $new_w;
     $last_configure_h = $new_h;
 
-    $engine->{canvas_w}                  = $new_w;
-    $engine->{scale_price}{canvas_width} = $new_w;
-    $engine->{scale_atr}{canvas_width}   = $new_w;
-
-    # Propagar la nueva altura del panel de precio al engine
-    my $new_price_h = $canvas_price->height();
-    if ($new_price_h > 10) {
-        $engine->{canvas_price_h}             = $new_price_h;
-        $engine->{scale_price}{canvas_height} = $new_price_h;
-    }
-
+    # Ya no inyectamos manualmente las variables a las escalas de forma dura desde aquí,
+    # ya que el método render() actualizado del Engine las lee en tiempo real directamente
+    # desde el tamaño físico de los Canvas. Solo disparamos la petición de refresco.
     $engine->request_render();
 });
 
