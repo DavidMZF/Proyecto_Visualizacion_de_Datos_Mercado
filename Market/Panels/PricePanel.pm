@@ -365,23 +365,60 @@ sub draw_time_axis {
         my ( $index, $label ) = @$entry;
         my $x = $scale->index_to_center_x($index);
 
-        # Tick vertical
-        $canvas->createLine(
-            $x, $scale->plot_height(),
-            $x, $scale->plot_height() + 4,
-            -fill => '#555555',
-            -tags => ['time_axis'],
-        );
+        # Detectar si es pivot de día (formato DD/MM) o etiqueta de hora
+        my $is_pivot = ( $label =~ m{^\d{2}/\d{2}$} );
 
-        # Etiqueta de tiempo
-        $canvas->createText(
-            $x, $y + 6,
-            -text   => $label,
-            -fill   => '#888888',
-            -font   => [ 'monospace', 7 ],
-            -anchor => 'n',
-            -tags   => ['time_axis'],
-        );
+        if ($is_pivot) {
+
+            # Línea vertical prominente para pivot de día
+            $canvas->createLine(
+                $x, 0,
+                $x, $scale->plot_height(),
+                -fill  => '#6b7280',
+                -dash => '.',
+                -width => 3,
+                -tags  => ['time_axis'],
+            );
+
+            # Tick más largo
+            $canvas->createLine(
+                $x, $scale->plot_height(),
+                $x, $scale->plot_height() + 6,
+                -fill  => '#c8ccd8',
+                -width => 2,
+                -tags  => ['time_axis'],
+            );
+
+            # Etiqueta de fecha en blanco brillante
+            $canvas->createText(
+                $x, $y + 7,
+                -text   => $label,
+                -fill   => '#ffffff',
+                -font   => [ 'monospace', 8, 'bold' ],
+                -anchor => 'n',
+                -tags   => ['time_axis'],
+            );
+        }
+        else {
+            # Tick corto normal
+            $canvas->createLine(
+                $x, $scale->plot_height(),
+                $x, $scale->plot_height() + 4,
+                -fill  => '#555555',
+                -width => 1,
+                -tags  => ['time_axis'],
+            );
+
+            # Etiqueta de hora en gris claro (más visible que antes)
+            $canvas->createText(
+                $x, $y + 6,
+                -text   => $label,
+                -fill   => '#aaaaaa',
+                -font   => [ 'monospace', 9 ],
+                -anchor => 'n',
+                -tags   => ['time_axis'],
+            );
+        }
     }
 }
 

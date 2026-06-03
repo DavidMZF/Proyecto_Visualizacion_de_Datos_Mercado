@@ -92,8 +92,9 @@ sub compute_window {
     my $size = $self->{market_data}->size();
     return ( 0, 0 ) if $size == 0;
 
-    my $max_offset = $size - 1;
-    $self->{offset} = 0           if $self->{offset} < 0;
+    my $max_offset = $size - 1 + $self->{visible_bars};
+    my $min_offset = -$self->{visible_bars};
+    $self->{offset} = $min_offset if $self->{offset} < $min_offset;
     $self->{offset} = $max_offset if $self->{offset} > $max_offset;
 
     my $end   = ( $size - 1 ) - $self->{offset};
@@ -274,11 +275,14 @@ sub bind_events {
                 my $bar_w = $self->{scale_price}->_bar_width();
                 if ( $bar_w >= 0.5 ) {
                     my $delta_bars = int( ( $x - $drag_start_x ) / $bar_w );
-                    $self->{offset} = $drag_start_offset - $delta_bars;
+                    $self->{offset} = $drag_start_offset + $delta_bars;
 
-                    my $size = $self->{market_data}->size();
-                    $self->{offset} = 0         if $self->{offset} < 0;
-                    $self->{offset} = $size - 1 if $self->{offset} > $size - 1;
+                    my $size       = $self->{market_data}->size();
+                    my $max_offset = $size - 1 + $self->{visible_bars};
+                    $self->{offset} = -$self->{visible_bars}
+                      if $self->{offset} < -$self->{visible_bars};
+                    $self->{offset} = $max_offset
+                      if $self->{offset} > $max_offset;
                 }
 
                 if ( $self->{view_mode} eq 'manual'
@@ -491,6 +495,7 @@ sub _draw_crosshair_all {
     my ( $self, $x, $y, $source ) = @_;
 
     my $idx      = $self->{scale_price}->x_to_index($x);
+    my $snap_x   = $self->{scale_price}->index_to_center_x($idx);
     my $ts       = $self->{market_data}->get_timestamp($idx);
     my $time_str = '';
     if ( defined $ts ) {
@@ -502,10 +507,10 @@ sub _draw_crosshair_all {
     my $price_y = $source eq 'price' ? $y : -1;
     my $atr_y   = $source eq 'atr'   ? $y : -1;
 
-    $self->{price_panel}
-      ->draw_crosshair( $x, $price_y, $source eq 'price' ? $time_str : '' );
+    $self->{price_panel}->draw_crosshair( $snap_x, $price_y,
+        $source eq 'price' ? $time_str : '' );
     $self->{atr_panel}
-      ->draw_crosshair( $x, $atr_y, $source eq 'atr' ? $time_str : '' );
+      ->draw_crosshair( $snap_x, $atr_y, $source eq 'atr' ? $time_str : '' );
 }
 
 sub set_timeframe {
@@ -529,18 +534,85 @@ sub reset_view {
 sub compute_intraday_labels {
     my ($self) = @_;
     my ( $start, $end ) = $self->compute_window();
+
     my $visible  = $end - $start + 1;
     my $n_labels = 6;
     my $step     = int( $visible / $n_labels ) || 1;
-    my @labels;
 
-    for ( my $i = $start ; $i <= $end ; $i += $step ) {
+    my @labels;
+    my $prev_day = undef;
+    my $i_start  = $start < 0 ? 0 : $start;
+
+    # Precomputar qué índices son pivot de día
+    my %is_day_pivot;
+    my $last_day = undef;
+    for my $i ( $i_start .. $end ) {
         my $ts = $self->{market_data}->get_timestamp($i);
         next unless defined $ts;
-        my @t     = localtime($ts);
-        my $label = sprintf( "%02d:%02d", $t[2], $t[1] );
-        push @labels, [ $i, $label ];
+        my @t   = localtime($ts);
+        my $day = $t[3];
+        if ( !defined $last_day || $day != $last_day ) {
+            $is_day_pivot{$i} = sprintf( "%02d/%02d", $t[3], $t[4] + 1 );
+            $last_day = $day;
+        }
     }
+
+    # Construir etiquetas: paso regular de horas + pivots de día inamovibles
+    my %used_idx;
+    for ( my $i = $i_start ; $i <= $end ; $i += $step ) {
+        my $ts = $self->{market_data}->get_timestamp($i);
+        next unless defined $ts;
+
+        if ( exists $is_day_pivot{$i} ) {
+            push @labels, [ $i, $is_day_pivot{$i} ];
+        }
+        else {
+            my @t = localtime($ts);
+            push @labels, [ $i, sprintf( "%02d:%02d", $t[2], $t[1] ) ];
+        }
+        $used_idx{$i} = 1;
+    }
+
+    # Insertar pivots de día que no cayeron en el paso regular
+    for my $i ( sort { $a <=> $b } keys %is_day_pivot ) {
+        next if $used_idx{$i};
+
+      # Verificar que no solape con etiqueta vecina (mitad del step como margen)
+        my $too_close = 0;
+        for my $used ( keys %used_idx ) {
+            if ( abs( $used - $i ) < int( $step / 2 ) ) {
+                $too_close = 1;
+                last;
+            }
+        }
+
+ # El pivot de día se inserta aunque esté cerca, solo reemplaza si solapa exacto
+        if ($too_close) {
+
+            # Reemplazar la etiqueta cercana por el pivot
+            @labels = grep { abs( $_->[0] - $i ) >= int( $step / 2 ) } @labels;
+        }
+        push @labels, [ $i, $is_day_pivot{$i} ];
+        $used_idx{$i} = 1;
+    }
+
+    # Pivot última vela siempre visible
+    my $last_idx = $self->{market_data}->last_index();
+    if ( $last_idx >= $start && $last_idx <= $end ) {
+        my $ts = $self->{market_data}->get_timestamp($last_idx);
+        if ( defined $ts ) {
+            my @t     = localtime($ts);
+            my $label = sprintf( "%02d/%02d", $t[3], $t[4] + 1 );
+
+            # Reemplazar si ya existe una entrada para ese índice
+            @labels = grep { $_->[0] != $last_idx } @labels;
+            push @labels, [ $last_idx, $label ];
+        }
+    }
+
+    # Ordenar por índice para que draw_time_axis las pinte en orden
+    @labels = sort { $a->[0] <=> $b->[0] } @labels;
+
     return \@labels;
 }
 
