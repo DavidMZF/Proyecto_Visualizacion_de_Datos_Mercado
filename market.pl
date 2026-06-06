@@ -244,5 +244,7 @@ $mw->bind('<Configure>', sub {
 # ═══════════════════════════════════════════════════════════
 
 print "Iniciando ventana gráfica...\n";
+
+$mw->update;
 $engine->request_render();
 MainLoop();
