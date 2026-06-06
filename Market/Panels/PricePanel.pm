@@ -161,9 +161,7 @@ sub render {
     $canvas->delete('last_price');
 
     my $bar_w = $scale->bar_width();
-
-    print STDERR "[DRAW] bar_width=$bar_w\n";
-
+    
     # Ancho del cuerpo: 80% del ancho de barra, mínimo 1px
     my $body_w = $bar_w;
 

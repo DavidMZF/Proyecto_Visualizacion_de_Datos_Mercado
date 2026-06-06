@@ -34,8 +34,11 @@ sub plot_height {
 
 sub bar_width {
     my ($self) = @_;
-    my $pw = $self->plot_width();
-    return $pw / ( $self->{visible_bars} + $self->{right_padding_bars} );
+    my $pw          = $self->plot_width();
+    my $right_px    = 60;   # espacio fijo en píxeles a la derecha, no en barras
+    my $usable      = $pw - $right_px;
+    $usable         = $pw * 0.85 if $usable < $pw * 0.5;
+    return $usable / $self->{visible_bars};
 }
 
 # Aliases con guion bajo para compatibilidad interna
