@@ -10,10 +10,13 @@ sub new {
         color_line  => $args{color_line}  // '#2962ff',
         color_cross => $args{color_cross} // '#ffffff',
         color_label => $args{color_label} // '#131722',
-        _ch_hline   => undef,
-        _ch_vline   => undef,
-        _ch_box     => undef,
-        _ch_label   => undef,
+
+        _ch_hline      => undef,
+        _ch_vline      => undef,
+        _ch_box        => undef,
+        _ch_label      => undef,
+        _ch_time_box   => undef,
+        _ch_time_label => undef,
     };
     bless $self, $class;
     $self->_init_crosshair();
@@ -63,7 +66,6 @@ sub _init_crosshair {
         -state   => 'hidden',
         -tags    => ['crosshair'],
     );
-
     $self->{_ch_time_label} = $c->createText(
         0, 0,
         -text   => '',
@@ -96,14 +98,18 @@ sub set_scale {
     $self->{scale} = $scale;
 }
 
+# ─── render ───────────────────────────────────────────────────────────────────
+# $data_start: índice absoluto del primer elemento del slice (>= 0 siempre).
+# Puede diferir de scale->{offset} cuando hay espacio vacío a la izquierda.
 sub render {
-    my ( $self, $canvas, $values, $scale ) = @_;
+    my ( $self, $canvas, $values, $scale, $data_start ) = @_;
+    $data_start //= $scale->{offset};
+    $data_start = 0 if $data_start < 0;
 
     $canvas->delete('atr_line');
     $canvas->delete('scale_y');
     $canvas->delete('last_atr');
 
-    my $start_index = $scale->{offset};
     my @points;
 
     for my $i ( 0 .. $#$values ) {
@@ -122,7 +128,7 @@ sub render {
             next;
         }
 
-        my $abs_idx = $start_index + $i;
+        my $abs_idx = $data_start + $i;
         my $x       = $scale->index_to_center_x($abs_idx);
         my $y       = $scale->value_to_y($val);
         push @points, $x, $y;
@@ -187,19 +193,17 @@ sub draw_crosshair {
 
     my $y_in_range = ( $y >= 0 && $y <= $ph );
 
-    # Línea vertical: siempre visible (sincronizada con price panel)
     $c->coords( $self->{_ch_vline}, $x, 0, $x, $ph );
     $c->itemconfigure( $self->{_ch_vline}, -state => 'normal' );
 
-    # Línea horizontal y caja de valor: solo si el mouse está en este canvas
     if ($y_in_range) {
         $c->coords( $self->{_ch_hline}, 0, $y, $pw, $y );
         $c->itemconfigure( $self->{_ch_hline}, -state => 'normal' );
 
         my $atr_val = $scale->y_to_value($y);
 
-        $c->coords( $self->{_ch_box}, $pw, $y - 9, $scale->{canvas_width},
-            $y + 9, );
+        $c->coords( $self->{_ch_box},
+            $pw, $y - 9, $scale->{canvas_width}, $y + 9 );
         $c->itemconfigure( $self->{_ch_box}, -state => 'normal' );
 
         $c->coords( $self->{_ch_label}, $pw + 4, $y );
@@ -215,18 +219,14 @@ sub draw_crosshair {
         $c->itemconfigure( $self->{_ch_label}, -state => 'hidden' );
     }
 
-    # Etiqueta temporal: solo si este canvas tiene el foco
     $time_str //= '';
     my $label_w = 70;
     my $y_time  = $ph + 1;
 
     if ( $time_str ne '' ) {
-        $c->coords(
-            $self->{_ch_time_box}, $x - $label_w / 2,
-            $y_time,
-            $x + $label_w / 2,
-            $y_time + 14,
-        );
+        $c->coords( $self->{_ch_time_box},
+            $x - $label_w / 2, $y_time,
+            $x + $label_w / 2, $y_time + 14 );
         $c->itemconfigure( $self->{_ch_time_box}, -state => 'normal' );
         $c->coords( $self->{_ch_time_label}, $x, $y_time + 1 );
         $c->itemconfigure(

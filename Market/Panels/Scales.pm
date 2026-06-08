@@ -19,9 +19,6 @@ sub new {
     return $self;
 }
 
-# ─── Métodos internos de dimensiones ─────────────────────────────────────────
-# Declarados como subs normales para que sean accesibles desde cualquier módulo
-
 sub plot_width {
     my ($self) = @_;
     return $self->{canvas_width} - $self->{margin_right};
@@ -32,16 +29,27 @@ sub plot_height {
     return $self->{canvas_height} - $self->{margin_bottom};
 }
 
+# ─── bar_width ────────────────────────────────────────────────────────────────
+# Ancho de barra en píxeles para los visible_bars actuales.
+# right_px: espacio fijo reservado a la derecha del área de plot (no en barras).
+# Si usable quedara menor al 50% del plot, se usa 85% del plot como fallback.
 sub bar_width {
     my ($self) = @_;
-    my $pw          = $self->plot_width();
-    my $right_px    = 60;   # espacio fijo en píxeles a la derecha, no en barras
-    my $usable      = $pw - $right_px;
-    $usable         = $pw * 0.85 if $usable < $pw * 0.5;
-    return $usable / $self->{visible_bars};
+    return $self->bar_width_for( $self->{visible_bars} );
 }
 
-# Aliases con guion bajo para compatibilidad interna
+# ─── bar_width_for ────────────────────────────────────────────────────────────
+# Calcula el ancho de barra para un número arbitrario de barras.
+# Centraliza la fórmula para que _zoom_cursor no la duplique.
+sub bar_width_for {
+    my ( $self, $n_bars ) = @_;
+    my $pw       = $self->plot_width();
+    my $right_px = 60;
+    my $usable   = $pw - $right_px;
+    $usable      = $pw * 0.85 if $usable < $pw * 0.5;
+    return $n_bars > 0 ? $usable / $n_bars : 1;
+}
+
 sub _plot_width  { return $_[0]->plot_width(); }
 sub _plot_height { return $_[0]->plot_height(); }
 sub _bar_width   { return $_[0]->bar_width(); }
@@ -56,12 +64,14 @@ sub index_to_x {
 
 sub x_to_index {
     my ( $self, $x ) = @_;
-    return int( $x / $self->bar_width() ) + $self->{offset};
+    my $bw = $self->bar_width();
+    return $bw > 0 ? int( $x / $bw ) + $self->{offset} : $self->{offset};
 }
 
 sub x_to_index_float {
     my ( $self, $x ) = @_;
-    return ( $x / $self->bar_width() ) + $self->{offset};
+    my $bw = $self->bar_width();
+    return $bw > 0 ? ( $x / $bw ) + $self->{offset} : $self->{offset};
 }
 
 sub index_to_center_x {
@@ -94,7 +104,7 @@ sub _draw_y_scale {
     my $tick    = 0.25;
     my $pw      = $self->plot_width();
     my $x_label = $self->{canvas_width} - $self->{margin_right} + 4;
-    my $min_px  = 14;    # altura mínima entre etiquetas para no solaparse
+    my $min_px  = 14;
 
     my $first = int( $self->{y_min} / $tick ) * $tick;
     $first += $tick if $first < $self->{y_min};
@@ -105,7 +115,6 @@ sub _draw_y_scale {
     while ( $v <= $self->{y_max} + 1e-9 ) {
         my $y = $self->value_to_y($v);
 
-        # Saltar si solapa con etiqueta anterior
         if ( !defined $prev_y || abs( $y - $prev_y ) >= $min_px ) {
             $canvas->createLine(
                 0, $y, $pw, $y,
@@ -123,8 +132,7 @@ sub _draw_y_scale {
             );
             $prev_y = $y;
         }
-        $v = int( ( $v + $tick ) / $tick + 0.5 ) *
-          $tick;    # evita acumulación de float
+        $v = int( ( $v + $tick ) / $tick + 0.5 ) * $tick;
     }
 }
 

@@ -3,12 +3,6 @@ use strict;
 use warnings;
 
 # ─── Constructor ──────────────────────────────────────────────────────────────
-# Input (args con nombre):
-#   canvas        => widget Tk::Canvas del panel de precios
-#   scale         => objeto Market::Panels::Scales
-#   market_data   => objeto Market::MarketData
-#   indicators    => objeto Market::IndicatorManager
-# Colores por defecto estilo TradingView oscuro
 sub new {
     my ( $class, %args ) = @_;
     my $self = {
@@ -17,29 +11,24 @@ sub new {
         market_data => $args{market_data},
         indicators  => $args{indicators},
 
-        # Colores
-        color_bull => $args{color_bull} // '#26a69a',    # vela alcista (verde)
-        color_bear => $args{color_bear} // '#ef5350',    # vela bajista (rojo)
-        color_wick => $args{color_wick} // '#888888',    # mechas
-        color_crosshair => $args{color_crosshair} // '#ffffff',    # crosshair
-        color_price_tag => $args{color_price_tag}
-          // '#131722',    # fondo etiqueta precio
+        color_bull      => $args{color_bull}      // '#26a69a',
+        color_bear      => $args{color_bear}      // '#ef5350',
+        color_wick      => $args{color_wick}      // '#888888',
+        color_crosshair => $args{color_crosshair} // '#ffffff',
+        color_price_tag => $args{color_price_tag} // '#131722',
 
-        # Objetos del crosshair (IDs de canvas Tk)
-        _ch_hline => undef,    # línea horizontal
-        _ch_vline => undef,    # línea vertical
-        _ch_label => undef,    # etiqueta de precio en eje Y
-        _ch_box   => undef,    # fondo de la etiqueta
+        _ch_hline      => undef,
+        _ch_vline      => undef,
+        _ch_label      => undef,
+        _ch_box        => undef,
+        _ch_time_box   => undef,
+        _ch_time_label => undef,
     };
     bless $self, $class;
     $self->_init_crosshair_objects();
     return $self;
 }
 
-# ─── _init_crosshair_objects ──────────────────────────────────────────────────
-# Crea los elementos gráficos del crosshair en el canvas (ocultos inicialmente).
-# Se crean una vez y se mueven/actualizan en draw_crosshair para eficiencia O(1).
-# Output: ninguno
 sub _init_crosshair_objects {
     my ($self) = @_;
     my $c = $self->{canvas};
@@ -62,7 +51,6 @@ sub _init_crosshair_objects {
         -tags  => ['crosshair'],
     );
 
-    # Fondo de la etiqueta de precio (rectángulo)
     $self->{_ch_box} = $c->createRectangle(
         0, 0, 0, 0,
         -fill    => $self->{color_crosshair},
@@ -71,7 +59,6 @@ sub _init_crosshair_objects {
         -tags    => ['crosshair'],
     );
 
-    # Texto del precio bajo el cursor
     $self->{_ch_label} = $c->createText(
         0, 0,
         -text   => '',
@@ -82,7 +69,6 @@ sub _init_crosshair_objects {
         -tags   => ['crosshair'],
     );
 
-    # Etiqueta temporal en eje X (crosshair)
     $self->{_ch_time_box} = $c->createRectangle(
         0, 0, 1, 1,
         -fill    => $self->{color_crosshair},
@@ -102,21 +88,12 @@ sub _init_crosshair_objects {
     );
 }
 
-# ─── round ────────────────────────────────────────────────────────────────────
-# Redondeo auxiliar a N decimales.
-# Input:  $value, $decimals (default 2)
-# Output: float redondeado
 sub round {
     my ( $self, $value, $decimals ) = @_;
     $decimals //= 2;
     return sprintf( "%.${decimals}f", $value ) + 0;
 }
 
-# ─── get_y_range ──────────────────────────────────────────────────────────────
-# Calcula el rango de precios (min, max) de las velas visibles.
-# Agrega un padding del 5% arriba y abajo para que las velas no toquen los bordes.
-# Input:  $data => arrayref de velas (slice visible)
-# Output: ($y_min, $y_max) o (0, 1) si no hay datos
 sub get_y_range {
     my ( $self, $data ) = @_;
     return ( 0, 1 ) unless @$data;
@@ -125,74 +102,58 @@ sub get_y_range {
     my $max = -9**9**9;
 
     for my $candle (@$data) {
-        $min = $candle->{low}  if $candle->{low} < $min;
+        $min = $candle->{low}  if $candle->{low}  < $min;
         $max = $candle->{high} if $candle->{high} > $max;
     }
 
-    # Padding del 5% del rango para respiración visual
     my $padding = ( $max - $min ) * 0.05;
-    $padding = 0.001 if $padding == 0;    # evitar rango cero
+    $padding = 0.001 if $padding == 0;
 
     return ( $min - $padding, $max + $padding );
 }
 
-# ─── set_scale ────────────────────────────────────────────────────────────────
-# Asigna o reemplaza el objeto Scales de este panel.
-# Input:  $scale => objeto Market::Panels::Scales
-# Output: ninguno
 sub set_scale {
     my ( $self, $scale ) = @_;
     $self->{scale} = $scale;
 }
 
 # ─── render ───────────────────────────────────────────────────────────────────
-# Función principal: dibuja todas las velas visibles en el canvas.
-# Borra el contenido previo (excepto crosshair) antes de redibujar.
-# Input:  $canvas => Tk::Canvas
-#         $data   => arrayref de velas visibles (slice)
-#         $scale  => objeto Market::Panels::Scales
-# Output: ninguno
+# $data_start: índice absoluto del primer elemento de $data en el array global.
+# Puede diferir de scale->{offset} cuando hay espacio vacío a la izquierda
+# (scale->{offset} puede ser negativo, pero $data_start >= 0 siempre).
 sub render {
-    my ( $self, $canvas, $data, $scale ) = @_;
+    my ( $self, $canvas, $data, $scale, $data_start ) = @_;
+    $data_start //= $scale->{offset};
+    $data_start = 0 if $data_start < 0;
 
-    # Borrar velas anteriores (preservar crosshair)
     $canvas->delete('candle');
     $canvas->delete('scale_y');
     $canvas->delete('last_price');
 
-    my $bar_w = $scale->bar_width();
-    
-    # Ancho del cuerpo: 80% del ancho de barra, mínimo 1px
+    my $bar_w  = $scale->bar_width();
     my $body_w = $bar_w;
-
     $body_w *= 0.95 if $bar_w > 3;
-
-    my $start_index = $scale->{offset};
 
     for my $i ( 0 .. $#$data ) {
         my $candle  = $data->[$i];
-        my $abs_idx = $start_index + $i;
+        my $abs_idx = $data_start + $i;
 
-        # Coordenadas X
+        # Coordenadas X basadas en el índice absoluto
         my $cx    = $scale->index_to_center_x($abs_idx);
         my $left  = $cx - $body_w / 2;
         my $right = $cx + $body_w / 2;
 
-        # Coordenadas Y (precios → píxeles)
         my $y_open  = $scale->value_to_y( $candle->{open} );
         my $y_close = $scale->value_to_y( $candle->{close} );
         my $y_high  = $scale->value_to_y( $candle->{high} );
         my $y_low   = $scale->value_to_y( $candle->{low} );
 
-        # Color según dirección
         my $is_bull = $candle->{close} >= $candle->{open};
         my $color   = $is_bull ? $self->{color_bull} : $self->{color_bear};
 
-        # Cuerpo superior e inferior (open puede ser mayor o menor que close)
         my $body_top    = $is_bull ? $y_close : $y_open;
         my $body_bottom = $is_bull ? $y_open  : $y_close;
 
-        # Dibujar mecha completa (high → low)
         $canvas->createLine(
             $cx, $y_high,
             $cx, $y_low,
@@ -201,8 +162,6 @@ sub render {
             -tags  => ['candle'],
         );
 
-        # Dibujar cuerpo de la vela
-        # Vela doji (open == close): dibujar línea horizontal
         if ( abs( $body_bottom - $body_top ) < 1 ) {
             $canvas->createLine(
                 $left,  $body_top,
@@ -223,15 +182,10 @@ sub render {
         }
     }
 
-    # Dibujar escala Y y último precio visible
     $scale->_draw_y_scale($canvas);
     $self->render_last_visible_price( $canvas, $data, $scale );
 }
 
-# ─── render_last_visible_price ────────────────────────────────────────────────
-# Dibuja una etiqueta destacada con el último precio visible en el eje Y.
-# Input:  $canvas, $data (slice visible), $scale
-# Output: ninguno
 sub render_last_visible_price {
     my ( $self, $canvas, $data, $scale ) = @_;
     return unless @$data;
@@ -241,7 +195,6 @@ sub render_last_visible_price {
     my $x_start    = $scale->plot_width();
     my $x_end      = $scale->{canvas_width};
 
-    # Línea punteada horizontal hasta el eje Y
     $canvas->createLine(
         0, $y, $x_start, $y,
         -fill  => '#f0b90b',
@@ -250,7 +203,6 @@ sub render_last_visible_price {
         -tags  => ['last_price'],
     );
 
-    # Fondo de la etiqueta
     $canvas->createRectangle(
         $x_start, $y - 9,
         $x_end,   $y + 9,
@@ -259,7 +211,6 @@ sub render_last_visible_price {
         -tags    => ['last_price'],
     );
 
-    # Precio en texto
     $canvas->createText(
         $x_start + 4, $y,
         -text   => sprintf( "%.2f", $last_close ),
@@ -270,19 +221,12 @@ sub render_last_visible_price {
     );
 }
 
-# ─── draw_crosshair ───────────────────────────────────────────────────────────
-# Mueve y hace visibles las líneas del crosshair en la posición del mouse.
-# Operación O(1): mueve objetos existentes, no crea nuevos.
-# Input:  $x, $y => coordenadas del mouse en el canvas
-# Output: ninguno
 sub draw_crosshair {
     my ( $self, $x, $y, $time_str ) = @_;
     my $c     = $self->{canvas};
     my $scale = $self->{scale};
     my $ph    = $scale->plot_height();
 
-    # Si y está fuera del canvas de precios, ocultar línea horizontal
-    # pero mantener la vertical (sincronizada con ATR)
     my $y_in_range = ( $y >= 0 && $y <= $ph );
 
     if ($y_in_range) {
@@ -293,17 +237,15 @@ sub draw_crosshair {
         $c->itemconfigure( $self->{_ch_hline}, -state => 'hidden' );
     }
 
-    # Línea vertical siempre visible (sincronizada con ATR)
     $c->coords( $self->{_ch_vline}, $x, 0, $x, $ph );
     $c->itemconfigure( $self->{_ch_vline}, -state => 'normal' );
 
-    # Caja y etiqueta de precio: solo si y está en rango
     if ($y_in_range) {
         my $price   = $scale->y_to_value($y);
         my $x_start = $scale->plot_width();
 
-        $c->coords( $self->{_ch_box}, $x_start, $y - 9, $scale->{canvas_width},
-            $y + 9, );
+        $c->coords( $self->{_ch_box},
+            $x_start, $y - 9, $scale->{canvas_width}, $y + 9 );
         $c->itemconfigure( $self->{_ch_box}, -state => 'normal' );
 
         $c->coords( $self->{_ch_label}, $x_start + 4, $y );
@@ -318,18 +260,14 @@ sub draw_crosshair {
         $c->itemconfigure( $self->{_ch_label}, -state => 'hidden' );
     }
 
-    # Etiqueta temporal en eje X
     $time_str //= '';
     my $label_w = 70;
     my $y_time  = $ph + 1;
 
     if ( $time_str ne '' ) {
-        $c->coords(
-            $self->{_ch_time_box}, $x - $label_w / 2,
-            $y_time,
-            $x + $label_w / 2,
-            $y_time + 14,
-        );
+        $c->coords( $self->{_ch_time_box},
+            $x - $label_w / 2, $y_time,
+            $x + $label_w / 2, $y_time + 14 );
         $c->itemconfigure( $self->{_ch_time_box}, -state => 'normal' );
         $c->coords( $self->{_ch_time_label}, $x, $y_time + 1 );
         $c->itemconfigure(
@@ -346,12 +284,6 @@ sub draw_crosshair {
     $c->raise('crosshair');
 }
 
-# ─── draw_time_axis ───────────────────────────────────────────────────────────
-# Dibuja el eje temporal (eje X) con etiquetas de tiempo.
-# Solo dibuja etiquetas para los índices provistos (calculados por ChartEngine).
-# Input:  $canvas     => Tk::Canvas
-#         $timestamps => arrayref de [ $index, $label_string ]
-# Output: ninguno
 sub draw_time_axis {
     my ( $self, $canvas, $timestamps ) = @_;
     my $scale = $self->{scale};
@@ -363,22 +295,16 @@ sub draw_time_axis {
         my ( $index, $label ) = @$entry;
         my $x = $scale->index_to_center_x($index);
 
-        # Detectar si es pivot de día (formato DD/MM) o etiqueta de hora
         my $is_pivot = ( $label =~ m{^\d{2}/\d{2}$} );
 
         if ($is_pivot) {
-
-            # Línea vertical prominente para pivot de día
             $canvas->createLine(
-                $x, 0,
-                $x, $scale->plot_height(),
+                $x, 0, $x, $scale->plot_height(),
                 -fill  => '#6b7280',
-                -dash => '.',
+                -dash  => '.',
                 -width => 3,
                 -tags  => ['time_axis'],
             );
-
-            # Tick más largo
             $canvas->createLine(
                 $x, $scale->plot_height(),
                 $x, $scale->plot_height() + 6,
@@ -386,8 +312,6 @@ sub draw_time_axis {
                 -width => 2,
                 -tags  => ['time_axis'],
             );
-
-            # Etiqueta de fecha en blanco brillante
             $canvas->createText(
                 $x, $y + 7,
                 -text   => $label,
@@ -398,7 +322,6 @@ sub draw_time_axis {
             );
         }
         else {
-            # Tick corto normal
             $canvas->createLine(
                 $x, $scale->plot_height(),
                 $x, $scale->plot_height() + 4,
@@ -406,8 +329,6 @@ sub draw_time_axis {
                 -width => 1,
                 -tags  => ['time_axis'],
             );
-
-            # Etiqueta de hora en gris claro (más visible que antes)
             $canvas->createText(
                 $x, $y + 6,
                 -text   => $label,
