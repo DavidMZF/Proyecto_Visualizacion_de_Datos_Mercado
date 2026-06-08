@@ -48,7 +48,6 @@ sub new {
         tf_buttons       => $args{tf_buttons} // {},
         _zoom_anchor_idx => undef,
         _zoom_anchor_x   => undef,
-        _cursor_x        => undef,
     };
 
     bless $self, $class;
@@ -98,19 +97,32 @@ sub _init_panels {
 
 sub compute_window {
     my ($self) = @_;
+
     my $size = $self->{market_data}->size();
     return ( 0, 0 ) if $size == 0;
 
     my $max_offset = $size - 1;
     my $min_offset = 0;
+
     $self->{offset} = $min_offset if $self->{offset} < $min_offset;
     $self->{offset} = $max_offset if $self->{offset} > $max_offset;
 
     my $end   = ( $size - 1 ) - $self->{offset};
     my $start = $end - $self->{visible_bars} + 1;
 
-    $start = 0 if $start < 0;
-    $end   = $size - 1 if $end >= $size;
+    # Mantener ancho al chocar con borde derecho
+    if ( $end > $size - 1 ) {
+        my $overflow = $end - ( $size - 1 );
+        $end   = $size - 1;
+        $start -= $overflow;
+    }
+
+    # Mantener ancho al chocar con borde izquierdo
+    if ( $start < 0 ) {
+        my $underflow = -$start;
+        $start = 0;
+        $end  += $underflow;
+    }
 
     return ( $start, $end );
 }
@@ -143,6 +155,7 @@ sub render {
         $self->{scale_price}{canvas_width}  = $current_w_price;
         $self->{scale_price}{canvas_height} = $current_h_price;
     }
+
     if ( $current_w_atr > 10 && $current_h_atr > 10 ) {
         $self->{scale_atr}{canvas_width}  = $current_w_atr;
         $self->{scale_atr}{canvas_height} = $current_h_atr;
@@ -151,6 +164,7 @@ sub render {
     $self->{canvas_price}->configure(
         -scrollregion => [ 0, 0, $current_w_price, $current_h_price ]
     );
+
     $self->{canvas_atr}->configure(
         -scrollregion => [ 0, 0, $current_w_atr, $current_h_atr ]
     );
@@ -162,6 +176,7 @@ sub render {
 
     my ( $start, $end ) = $self->compute_window();
 
+    print "\n=== RENDER ===\n";
     print "start=$start end=$end\n";
     print "visible=".$self->{visible_bars}."\n";
     print "offset=".$self->{offset}."\n";
@@ -180,17 +195,23 @@ sub render {
     my ( $y_min, $y_max );
 
     if ( $self->{view_mode} eq 'manual' ) {
-        unless ( defined $self->{y_min_manual}
-            && defined $self->{y_max_manual} )
-        {
+
+        unless (
+            defined $self->{y_min_manual}
+            && defined $self->{y_max_manual}
+        ) {
             ( $self->{y_min_manual}, $self->{y_max_manual} ) =
-              $self->{price_panel}->get_y_range($price_data);
+                $self->{price_panel}->get_y_range($price_data);
         }
+
         $y_min = $self->{y_min_manual};
         $y_max = $self->{y_max_manual};
     }
     else {
-        ( $y_min, $y_max ) = $self->{price_panel}->get_y_range($price_data);
+
+        ( $y_min, $y_max ) =
+            $self->{price_panel}->get_y_range($price_data);
+
         $self->{y_min_manual} = undef;
         $self->{y_max_manual} = undef;
     }
@@ -198,25 +219,45 @@ sub render {
     $self->{scale_price}{y_min} = $y_min;
     $self->{scale_price}{y_max} = $y_max;
 
-    my ( $atr_min, $atr_max ) = $self->{atr_panel}->get_y_range($atr_values);
+    my ( $atr_min, $atr_max ) =
+        $self->{atr_panel}->get_y_range($atr_values);
+
     $self->{scale_atr}{y_min} = $atr_min;
     $self->{scale_atr}{y_max} = $atr_max;
 
     $self->{price_panel}
-      ->render( $self->{canvas_price}, $price_data, $self->{scale_price} );
+        ->render(
+            $self->{canvas_price},
+            $price_data,
+            $self->{scale_price}
+        );
+
     $self->{atr_panel}
-      ->render( $self->{canvas_atr}, $atr_values, $self->{scale_atr} );
+        ->render(
+            $self->{canvas_atr},
+            $atr_values,
+            $self->{scale_atr}
+        );
 
     my $timestamps = $self->compute_intraday_labels();
-    $self->{price_panel}->draw_time_axis( $self->{canvas_price}, $timestamps );
+
+    $self->{price_panel}
+        ->draw_time_axis(
+            $self->{canvas_price},
+            $timestamps
+        );
 
     $self->{canvas_price}->delete('mode_status_indicator');
 
     my $text_to_show =
-      $self->{view_mode} eq 'auto'
-      ? "ESC: ESCALA AUTOMÁTICA"
-      : "ESC: ESCALA MANUAL (Arrastre 2D habilitado)";
-    my $text_color = $self->{view_mode} eq 'auto' ? '#00ff00' : '#ffa500';
+        $self->{view_mode} eq 'auto'
+        ? "ESC: ESCALA AUTOMÁTICA"
+        : "ESC: ESCALA MANUAL (Arrastre 2D habilitado)";
+
+    my $text_color =
+        $self->{view_mode} eq 'auto'
+        ? '#00ff00'
+        : '#ffa500';
 
     $self->{canvas_price}->createText(
         15, 15,
@@ -227,10 +268,16 @@ sub render {
         -tags   => 'mode_status_indicator'
     );
 
-    if ( defined $self->{_cursor_idx} ) {
-        my $snap_x = $self->{scale_price}->index_to_center_x( $self->{_cursor_idx} );
+    if ( defined $self->{_cursor_x} ) {
+
+        my $idx_before =
+            $self->{scale_price}
+                 ->x_to_index_float(
+                     $self->{_cursor_x}
+                 );
+
         $self->_draw_crosshair_all(
-            $snap_x,
+            $self->{_cursor_x},
             $self->{_cursor_y}      // -1,
             $self->{_cursor_source} // 'price'
         );
@@ -552,84 +599,119 @@ sub _horizontal_zoom {
     $new_bars = 10        if $new_bars < 10;
     $new_bars = $size - 1 if $new_bars > $size - 1;
     $new_bars = 1         if $new_bars < 1;
+
     return if $new_bars == $old_bars;
 
     my $anchor_idx = $self->{_cursor_idx_float};
-
-    # <-- AQUÍ
-    print "cursor_x=".$self->{_cursor_x}."\n";
-    print "anchor_idx=".$self->{_cursor_idx_float}."\n";
-
-    my $cx =
-        $self->{scale_price}
-             ->index_to_center_x(
-                 $self->{_cursor_idx_float}
-             );
-
-    print "center_x=$cx\n";
-    print "mouse_delta="
-          . ($self->{_cursor_x} - $cx)
-          . "\n";
-
-    print "\n";
-    print "anchor_idx=$anchor_idx\n";
 
     my $snap_before =
         $self->{scale_price}
              ->index_to_center_x($anchor_idx);
 
-    print "snap_before=$snap_before\n";
-
-    my $pw         = $self->{scale_price}->plot_width();
-    my $right_pad  = $self->{scale_price}{right_padding_bars};
+    my $pw = $self->{scale_price}->plot_width();
 
     if ( defined $anchor_idx && $pw > 0 ) {
 
         my ( $start, $end ) = $self->compute_window();
-        my $actual_bars = $end - $start + 1;
 
         my $old_bw = $self->{scale_price}->bar_width();
         return if $old_bw <= 0;
 
-        my $snap_x = ( $anchor_idx - $start ) * $old_bw + $old_bw / 2.0;
+        my $snap_x =
+            ( $anchor_idx - $start ) * $old_bw
+            + $old_bw / 2.0;
 
         $self->{visible_bars} = $new_bars;
 
-        my ( $new_start, $new_end ) = $self->compute_window();
-        my $new_actual_bars = $new_end - $new_start + 1;
+        $self->{scale_price}{visible_bars} = $new_bars;
 
-       $self->{scale_price}{visible_bars} = $new_bars;
         my $new_bw = $self->{scale_price}->bar_width();
         return if $new_bw <= 0;
 
-        my $new_start_f = $anchor_idx - ( $snap_x - $new_bw / 2.0 ) / $new_bw;
-        my $new_end_f   = $new_start_f + $new_bars - 1;
+        my $new_start_f =
+            $anchor_idx
+            - ( $snap_x - $new_bw / 2.0 ) / $new_bw;
 
-        my $new_offset = ( $size - 1 ) - $new_end_f;
-        $new_offset = 0         if $new_offset < 0;
-        $new_offset = $size - 1 if $new_offset > $size - 1;
-        print "new_start_f=$new_start_f\n";
-        print "new_end_f=$new_end_f\n";
-        print "new_offset=$new_offset\n";
+        my $new_end_f =
+            $new_start_f + $new_bars - 1;
+
+        if ( $new_end_f > $size - 1 ) {
+
+            my $overflow = $new_end_f - ($size - 1);
+
+            my $clamped_start =
+                ($size - 1)
+                - $new_bars
+                + 1;
+
+            print "\n*** RIGHT EDGE HIT ***\n";
+            print "anchor_idx=$anchor_idx\n";
+            print "new_start_f=$new_start_f\n";
+            print "new_end_f=$new_end_f\n";
+            print "visible_bars=$new_bars\n";
+            print "overflow=$overflow\n";
+            print "clamped_start=$clamped_start\n";
+            print "start_shift=".($clamped_start - $new_start_f)."\n";
+        }
+
+        my $new_offset =
+            ( $size - 1 ) - $new_end_f;
+
+        $new_offset = 0
+            if $new_offset < 0;
+
+        $new_offset = $size - 1
+            if $new_offset > $size - 1;
+
         $self->{offset} = $new_offset;
+
+        my ( $final_start, $final_end ) =
+            $self->compute_window();
+
+        my $tmp_scale = $self->{scale_price};
+
+        $tmp_scale->{offset} = $final_start;
+
+        my $snap_after =
+            $tmp_scale->index_to_center_x(
+                $anchor_idx
+            );
+
+        print "\n=== ZOOM ===\n";
+        print "offset_before=".$self->{offset}."\n";
+
+        print "anchor_idx=".$anchor_idx."\n";
+
+        print "snap_before=".$snap_before."\n";
+        print "snap_after=".$snap_after."\n";
+
+        print "delta="
+              . ($snap_after - $snap_before)
+              . "\n";
+
+        print "new_start_f=".$new_start_f."\n";
+        print "new_end_f=".$new_end_f."\n";
+        print "new_offset=".$new_offset."\n";
+
+        print "size_minus_1="
+              . ($size - 1)
+              . "\n";
+
+        print "final_start=".$final_start."\n";
+        print "final_end=".$final_end."\n";
+
+
     }
     else {
+
         $self->{visible_bars} = $new_bars;
-        $self->{offset} = 0         if $self->{offset} < 0;
-        $self->{offset} = $size - 1 if $self->{offset} > $size - 1;
+
+        $self->{offset} = 0
+            if $self->{offset} < 0;
+
+        $self->{offset} = $size - 1
+            if $self->{offset} > $size - 1;
     }
-
-    my ($s,$e)= $self->compute_window();
-
-    my $tmp_scale = $self->{scale_price};
-
-    $tmp_scale->{offset} = $s;
-
-    my $snap_after =
-        $tmp_scale->index_to_center_x($anchor_idx);
-
-    print "snap_after=$snap_after\n";
-    print "delta=" . ($snap_after-$snap_before) . "\n";
 
     $self->request_render();
 }
@@ -673,6 +755,8 @@ sub _vertical_zoom {
 
 sub _draw_crosshair_all {
     my ( $self, $x, $y, $source ) = @_;
+
+    $self->{_cursor_x} = $x;
 
     my $idx    = $self->{scale_price}->x_to_index($x);
     my $snap_x = $self->{scale_price}->index_to_center_x($idx);
