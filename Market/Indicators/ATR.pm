@@ -1,138 +1,130 @@
 package Market::Indicators::ATR;
+
+# =============================================================================
+# Market::Indicators::ATR
+# Average True Range (Wilder)
+#
+# Modificado para rellenar el inicio:
+# Las primeras (period-1) velas calculan un promedio progresivo (SMA)
+# para que la linea nazca exactamente en la vela 0 sin dejar huecos.
+# A partir de la vela `period`, se aplica el suavizado original de Wilder.
+# =============================================================================
+
 use strict;
 use warnings;
 
-# ─── Constructor ──────────────────────────────────────────────────────────────
-# Input:  $period => entero, ventana del ATR (típicamente 14)
-# Output: objeto ATR
+# -----------------------------------------------------------------------------
+# new
+# $period: periodo del ATR (default 14)
+# -----------------------------------------------------------------------------
 sub new {
-    my ( $class, $period ) = @_;
+    my ($class, $period) = @_;
+    $period //= 14;
     my $self = {
         period      => $period,
-        values      => [],      # ATR calculado por vela
-        tr_buffer   => [],      # True Range acumulado (para inicialización SMA)
-        prev_close  => undef,
-        initialized => 0,
+        values      => [],       # ATR calculado por vela (paralelo a candles)
+        _trs        => [],       # True Ranges acumulados (fase seed)
+        _seeded     => 0,        # 1 cuando ya se calculo el seed completo
+        _last_atr   => undef,    # ATR de la vela anterior (para Wilder)
+        _prev_close => undef,    # close de la vela anterior (para TR)
     };
     bless $self, $class;
     return $self;
 }
 
-# ─── _true_range ──────────────────────────────────────────────────────────────
-# Calcula el True Range de una vela respecto al cierre anterior.
-# Input:  hashref $candle, $prev_close (undef en la primera vela)
-# Output: valor numérico del TR
-sub _true_range {
-    my ( $self, $candle, $prev_close ) = @_;
-
-    my $hl = $candle->{high} - $candle->{low};
-
-    # Primera vela: no hay cierre anterior, TR es solo high - low
-    unless ( defined $prev_close ) {
-        return $hl;
-    }
-
-    my $hc = abs( $candle->{high} - $prev_close );
-    my $lc = abs( $candle->{low} - $prev_close );
-
-    # TR = max de los tres
-    my $tr = $hl;
-    $tr = $hc if $hc > $tr;
-    $tr = $lc if $lc > $tr;
-    return $tr;
-}
-
-# ─── update_last ──────────────────────────────────────────────────────────────
-# Actualiza el ATR con los datos completos del MarketData activo.
-# Recalcula solo desde el último punto conocido (incremental).
-# Input:  $market_data => objeto Market::MarketData
-# Output: ninguno
+# -----------------------------------------------------------------------------
+# update_last
+# Procesa la ULTIMA vela del market_data (recien agregada). Uso: streaming.
+# -----------------------------------------------------------------------------
 sub update_last {
-    my ( $self, $market_data ) = @_;
+    my ($self, $market_data) = @_;
+    my $last = $market_data->last_candle;
+    return unless defined $last;
+    $self->_process_candle($last);
+}
 
-    my $size   = $market_data->size();
-    my $period = $self->{period};
+# -----------------------------------------------------------------------------
+# update_at_index
+# Procesa la vela en $idx. Uso: rebuild completo (cambio de timeframe).
+# -----------------------------------------------------------------------------
+sub update_at_index {
+    my ($self, $market_data, $idx) = @_;
+    my $candle = $market_data->get_candle($idx);
+    return unless defined $candle;
+    $self->_process_candle($candle);
+}
 
-    # Cuántas velas ya procesamos
-    my $already = scalar @{ $self->{values} };
+# -----------------------------------------------------------------------------
+# _process_candle  (privado)
+# Calcula el TR de la vela y actualiza el ATR.
+# -----------------------------------------------------------------------------
+sub _process_candle {
+    my ($self, $c) = @_;
 
-    # Nada nuevo que procesar
-    return if $size == 0 || $size <= $already;
+    my $high  = $c->{high};
+    my $low   = $c->{low};
+    my $close = $c->{close};
 
-    # Procesar desde la siguiente vela no calculada
-    for my $i ( $already .. $size - 1 ) {
-        my $candle = $market_data->get_candle($i);
-        my $prev_close =
-            $i > 0
-          ? $market_data->get_candle( $i - 1 )->{close}
-          : undef;
+    # True Range
+    my $tr;
+    if (defined $self->{_prev_close}) {
+        my $cp = $self->{_prev_close};
+        my $a  = $high - $low;
+        my $b  = abs($high - $cp);
+        my $d  = abs($low  - $cp);
+        $tr = $a;
+        $tr = $b if $b > $tr;
+        $tr = $d if $d > $tr;
+    } else {
+        $tr = $high - $low;
+    }
+    $self->{_prev_close} = $close;
 
-        my $tr = $self->_true_range( $candle, $prev_close );
+    push @{ $self->{_trs} }, $tr;
+    my $n = $self->{period};
+    my $count = scalar @{ $self->{_trs} };
 
-        if ( !$self->{initialized} ) {
+    if (!$self->{_seeded}) {
+        # Promedio Simple Progresivo para rellenar los primeros espacios
+        my $sum = 0;
+        $sum += $_ for @{ $self->{_trs} };
+        my $current_atr = $sum / $count;
 
-            # Fase de acumulación: guardar TRs hasta tener `period` valores
-            push @{ $self->{tr_buffer} }, $tr;
+        $self->{_last_atr} = $current_atr;
+        push @{ $self->{values} }, $current_atr;
 
-            # CORRECCIÓN: eliminar el for, los undef ya fueron insertados en el else
-            if (scalar @{ $self->{tr_buffer} } >= $period) {
-                my $sum = 0;
-                $sum += $_ for @{ $self->{tr_buffer} };
-                my $atr_init = $sum / $period;
-                push @{ $self->{values} }, $atr_init;   # ← solo este push
-                $self->{initialized} = 1;
-            }
-            else {
-                # Todavía sin suficientes datos
-                push @{ $self->{values} }, undef;
-            }
-
+        # Cuando llegamos a la cantidad del periodo (ej. 14), activamos el suavizado de Wilder
+        if ($count >= $n) {
+            $self->{_seeded} = 1;
         }
-        else {
-            # Suavizado de Wilder:
-            # ATR = (ATR_prev × (period - 1) + TR) / period
-            my $prev_atr = $self->{values}[-1];
-            my $atr;
-
-            if ( defined $prev_atr ) {
-                $atr = ( $prev_atr * ( $period - 1 ) + $tr ) / $period;
-            }
-            else {
-                # Caso borde: buscar el último ATR válido
-                my $last_valid = undef;
-                for my $v ( reverse @{ $self->{values} } ) {
-                    if ( defined $v ) { $last_valid = $v; last; }
-                }
-                $atr =
-                  defined $last_valid
-                  ? ( $last_valid * ( $period - 1 ) + $tr ) / $period
-                  : $tr;
-            }
-
-            push @{ $self->{values} }, $atr;
-        }
+    } else {
+        # Suavizado de Wilder original
+        my $new_atr = ($self->{_last_atr} * ($n - 1) + $tr) / $n;
+        $self->{_last_atr} = $new_atr;
+        push @{ $self->{values} }, $new_atr;
     }
 }
 
-# ─── get_values ───────────────────────────────────────────────────────────────
-# Devuelve la serie completa del ATR.
-# Los primeros (period - 1) valores son undef (no hay suficientes datos aún).
-# Output: arrayref de floats (o undef donde no aplica)
+# -----------------------------------------------------------------------------
+# get_values
+# Devuelve arrayref completo de valores ATR.
+# -----------------------------------------------------------------------------
 sub get_values {
     my ($self) = @_;
     return $self->{values};
 }
 
-# ─── reset ────────────────────────────────────────────────────────────────────
-# Reinicia el indicador completamente.
-# Necesario al cambiar de timeframe.
-# Output: ninguno
+# -----------------------------------------------------------------------------
+# reset
+# Reinicia el indicador (necesario al cambiar de timeframe).
+# -----------------------------------------------------------------------------
 sub reset {
     my ($self) = @_;
     $self->{values}      = [];
-    $self->{tr_buffer}   = [];
-    $self->{prev_close}  = undef;
-    $self->{initialized} = 0;
+    $self->{_trs}        = [];
+    $self->{_seeded}     = 0;
+    $self->{_last_atr}   = undef;
+    $self->{_prev_close} = undef;
 }
 
 1;

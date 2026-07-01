@@ -1,246 +1,236 @@
 package Market::Panels::ATRPanel;
+
 use strict;
 use warnings;
 
-sub new {
-    my ( $class, %args ) = @_;
-    my $self = {
-        canvas      => $args{canvas},
-        scale       => $args{scale},
-        color_line  => $args{color_line}  // '#2962ff',
-        color_cross => $args{color_cross} // '#ffffff',
-        color_label => $args{color_label} // '#131722',
+use constant {
+    COLOR_ATR      => '#2189ff',
+    COLOR_ATR_LAST => '#0004ff',
+    COLOR_CROSS    => '#8b95a7',
+    BG_COLOR       => '#0f131a',
+};
 
-        _ch_hline      => undef,
-        _ch_vline      => undef,
-        _ch_box        => undef,
-        _ch_label      => undef,
-        _ch_time_box   => undef,
-        _ch_time_label => undef,
+sub new {
+    my ($class, %args) = @_;
+
+    my $self = {
+        canvas        => $args{canvas},
+        scale         => undef,
+        price_scale_w => $args{price_scale_w} // 90,
+        _ch_vline     => undef,
+        _ch_hline     => undef,
+        _ch_label_bg  => undef,
+        _ch_label     => undef,
+        _cross_ready  => 0,
     };
+
     bless $self, $class;
-    $self->_init_crosshair();
     return $self;
 }
 
 sub _init_crosshair {
     my ($self) = @_;
-    my $c = $self->{canvas};
 
-    $self->{_ch_hline} = $c->createLine(
-        0, 0, 1, 0,
-        -fill  => $self->{color_cross},
-        -dash  => [ 4, 4 ],
-        -width => 1,
+    my $c = $self->{canvas};
+    return unless $c;
+    return if $self->{_cross_ready};
+
+    $self->{_ch_vline} = $c->createLine(0, 0, 0, 1,
+        -fill  => COLOR_CROSS,
+        -dash  => [4, 4],
         -state => 'hidden',
-        -tags  => ['crosshair'],
-    );
-    $self->{_ch_vline} = $c->createLine(
-        0, 0, 0, 1,
-        -fill  => $self->{color_cross},
-        -dash  => [ 4, 4 ],
-        -width => 1,
+        -tags  => ['crosshair_atr']);
+    $self->{_ch_hline} = $c->createLine(0, 0, 1, 0,
+        -fill  => COLOR_CROSS,
+        -dash  => [4, 4],
         -state => 'hidden',
-        -tags  => ['crosshair'],
-    );
-    $self->{_ch_box} = $c->createRectangle(
-        0, 0, 1, 1,
-        -fill    => $self->{color_cross},
-        -outline => $self->{color_cross},
+        -tags  => ['crosshair_atr']);
+    $self->{_ch_label_bg} = $c->createRectangle(0, 0, 1, 1,
+        -fill    => '#222b3a',
+        -outline => '#222b3a',
         -state   => 'hidden',
-        -tags    => ['crosshair'],
-    );
-    $self->{_ch_label} = $c->createText(
-        0, 0,
+        -tags    => ['crosshair_atr']);
+    $self->{_ch_label} = $c->createText(0, 0,
         -text   => '',
-        -fill   => $self->{color_label},
-        -font   => [ 'monospace', 8, 'bold' ],
-        -anchor => 'w',
+        -fill   => '#ffffff',
+        -anchor => 'center',
+        -font   => 'TkFixedFont 8 bold',
         -state  => 'hidden',
-        -tags   => ['crosshair'],
-    );
-    $self->{_ch_time_box} = $c->createRectangle(
-        0, 0, 1, 1,
-        -fill    => $self->{color_cross},
-        -outline => $self->{color_cross},
-        -state   => 'hidden',
-        -tags    => ['crosshair'],
-    );
-    $self->{_ch_time_label} = $c->createText(
-        0, 0,
-        -text   => '',
-        -fill   => $self->{color_label},
-        -font   => [ 'monospace', 8, 'bold' ],
-        -anchor => 'n',
-        -state  => 'hidden',
-        -tags   => ['crosshair'],
-    );
+        -tags   => ['crosshair_atr']);
+
+    $self->{_cross_ready} = 1;
 }
 
 sub get_y_range {
-    my ( $self, $values ) = @_;
-    my @valid = grep { defined $_ } @$values;
-    return ( 0, 1 ) unless @valid;
+    my ($self, $values) = @_;
+    return (0, 1) unless $values && @$values;
 
-    my ( $min, $max ) = ( $valid[0], $valid[0] );
-    for my $v (@valid) {
-        $min = $v if $v < $min;
-        $max = $v if $v > $max;
+    my ($min, $max);
+    for my $v (@$values) {
+        next unless defined $v;
+        $min = $v if !defined $min || $v < $min;
+        $max = $v if !defined $max || $v > $max;
     }
+    return (0, 1) unless defined $max;
 
-    my $padding = ( $max - $min ) * 0.10;
-    $padding = 0.0001 if $padding == 0;
-    return ( $min - $padding, $max + $padding );
+    my $range = $max - $min;
+    $range = $max * 0.02 if $range < 1e-9;
+    my $mg = $range * 0.02;
+    $mg = 0.0001 if $mg < 0.0001;
+
+    my $floor = $min - $mg;
+    $floor = 0 if $floor < 0;
+
+    return ($floor, $max + $mg);
 }
 
 sub set_scale {
-    my ( $self, $scale ) = @_;
+    my ($self, $scale) = @_;
     $self->{scale} = $scale;
 }
 
-# ─── render ───────────────────────────────────────────────────────────────────
-# $data_start: índice absoluto del primer elemento del slice (>= 0 siempre).
-# Puede diferir de scale->{offset} cuando hay espacio vacío a la izquierda.
 sub render {
-    my ( $self, $canvas, $values, $scale, $data_start ) = @_;
-    $data_start //= $scale->{offset};
-    $data_start = 0 if $data_start < 0;
+    my ($self, $canvas, $values, $scale) = @_;
+    return unless $values && @$values;
 
-    $canvas->delete('atr_line');
-    $canvas->delete('scale_y');
-    $canvas->delete('last_atr');
+    $canvas->delete('atr_all');
 
-    my @points;
-
-    for my $i ( 0 .. $#$values ) {
-        my $val = $values->[$i];
-
-        unless ( defined $val ) {
-            if ( @points >= 4 ) {
-                $canvas->createLine(
-                    @points,
-                    -fill  => $self->{color_line},
-                    -width => 1.5,
-                    -tags  => ['atr_line'],
-                );
-            }
-            @points = ();
-            next;
-        }
-
-        my $abs_idx = $data_start + $i;
-        my $x       = $scale->index_to_center_x($abs_idx);
-        my $y       = $scale->value_to_y($val);
-        push @points, $x, $y;
-    }
-
-    if ( @points >= 4 ) {
-        $canvas->createLine(
-            @points,
-            -fill  => $self->{color_line},
-            -width => 1.5,
-            -tags  => ['atr_line'],
-        );
-    }
+    $canvas->createRectangle(0, 0, $scale->{canvas_w}, $scale->{canvas_h},
+        -fill => BG_COLOR, -outline => BG_COLOR, -tags => ['atr_all']);
 
     $scale->_draw_y_scale($canvas);
-    $self->render_last_visible_value( $canvas, $values, $scale );
+
+    $canvas->createText(8, 4,
+        -text   => 'ATR(14)',
+        -fill   => COLOR_ATR,
+        -anchor => 'nw',
+        -font   => 'TkFixedFont 8 bold',
+        -tags   => ['atr_all'],
+    );
+
+    my @seg;
+    my $n = scalar @$values;
+    
+    # FIX: ver nota equivalente en PricePanel::render -- offset puede ser
+    # fraccionario, slice_start es el indice ENTERO real del recorte.
+    my $start_idx = defined $scale->{slice_start}
+        ? $scale->{slice_start}
+        : ( $scale->{offset} < 0 ? 0 : $scale->{offset} );
+
+    for my $i (0 .. $n - 1) {
+        my $v   = $values->[$i];
+        my $idx = $i + $start_idx; 
+        
+        if (defined $v) {
+            my $x = $scale->index_to_center_x($idx);
+            # Utilizamos _raw en vez de _to_y para permitir a Tk recortar fuera del eje
+            my $y = $scale->value_to_y_raw($v); 
+            push @seg, $x, $y;
+        } else {
+            if (@seg >= 4) {
+                $canvas->createLine(@seg,
+                    -fill  => COLOR_ATR,
+                    -width => 1.5,
+                    -tags  => ['atr_all'],
+                );
+            }
+            @seg = ();
+        }
+    }
+    if (@seg >= 4) {
+        $canvas->createLine(@seg,
+            -fill  => COLOR_ATR,
+            -width => 1.5,
+            -tags  => ['atr_all'],
+        );
+    }
 }
 
 sub render_last_visible_value {
-    my ( $self, $canvas, $values, $scale ) = @_;
-
-    my $last_val = undef;
-    for my $v ( reverse @$values ) {
-        if ( defined $v ) { $last_val = $v; last; }
-    }
+    my ($self, $canvas) = @_;
+    return unless $self->{scale};
+    my $scale    = $self->{scale};
+    my $last_val = $scale->{last_atr_val};
     return unless defined $last_val;
+    return unless $scale->value_in_range($last_val);
 
-    my $y       = $scale->value_to_y($last_val);
-    my $x_start = $scale->_plot_width();
+    my $y     = $scale->value_to_y($last_val);
+    my $x_sep = $scale->_plot_w;
+    my $x_end = $scale->{canvas_w};
 
-    $canvas->createLine(
-        0, $y, $x_start, $y,
-        -fill  => $self->{color_line},
-        -dash  => [ 3, 3 ],
-        -width => 1,
-        -tags  => ['last_atr'],
-    );
-    $canvas->createRectangle(
-        $x_start,               $y - 9,
-        $scale->{canvas_width}, $y + 9,
-        -fill    => $self->{color_line},
-        -outline => $self->{color_line},
-        -tags    => ['last_atr'],
-    );
-    $canvas->createText(
-        $x_start + 4, $y,
-        -text   => sprintf( "%.4f", $last_val ),
-        -fill   => $self->{color_label},
-        -font   => [ 'monospace', 8, 'bold' ],
-        -anchor => 'w',
-        -tags   => ['last_atr'],
-    );
+    $canvas->createLine(0, $y, $x_sep, $y,
+        -fill => COLOR_ATR_LAST, -dash => [3,3], -width => 1, -tags => ['atr_all']);
+    $canvas->createRectangle($x_sep+1, $y-9, $x_end-1, $y+9,
+        -fill => COLOR_ATR_LAST, -outline => COLOR_ATR_LAST, -tags => ['atr_all']);
+    $canvas->createText($x_sep + ($x_end-$x_sep)/2, $y,
+        -text   => sprintf('%.4f', $last_val),
+        -fill   => '#ffffff',
+        -anchor => 'center',
+        -font   => 'TkFixedFont 8 bold',
+        -tags   => ['atr_all']);
+}
+
+sub show_vline_only {
+    my ($self, $x) = @_;
+    my $c     = $self->{canvas};
+    my $scale = $self->{scale};
+    return unless $c && $scale && defined $self->{_ch_vline};
+
+    my $h     = $scale->{canvas_h};
+    my $x_sep = $scale->_plot_w;
+
+    if ($x < 0 || $x > $x_sep) {
+        $c->itemconfigure('crosshair_atr', -state => 'hidden');
+        return;
+    }
+
+    $c->coords($self->{_ch_vline}, $x, 0, $x, $h);
+    $c->itemconfigure($self->{_ch_vline},    -state => 'normal');
+    $c->itemconfigure($self->{_ch_hline},    -state => 'hidden');
+    $c->itemconfigure($self->{_ch_label_bg}, -state => 'hidden');
+    $c->itemconfigure($self->{_ch_label},    -state => 'hidden');
+
+    $c->raise('crosshair_atr');
+}
+
+sub hide_crosshair {
+    my ($self) = @_;
+    my $c = $self->{canvas};
+    return unless $c;
+    $c->itemconfigure('crosshair_atr', -state => 'hidden');
 }
 
 sub draw_crosshair {
-    my ( $self, $x, $y, $time_str ) = @_;
+    my ($self, $x, $y) = @_;
     my $c     = $self->{canvas};
     my $scale = $self->{scale};
+    return unless $c && $scale && defined $self->{_ch_vline};
 
-    my $pw = $scale->_plot_width();
-    my $ph = $scale->_plot_height();
+    my $h     = $scale->{canvas_h};
+    my $x_sep = $scale->_plot_w;
+    my $x_end = $scale->{canvas_w};
 
-    my $y_in_range = ( $y >= 0 && $y <= $ph );
-
-    $c->coords( $self->{_ch_vline}, $x, 0, $x, $ph );
-    $c->itemconfigure( $self->{_ch_vline}, -state => 'normal' );
-
-    if ($y_in_range) {
-        $c->coords( $self->{_ch_hline}, 0, $y, $pw, $y );
-        $c->itemconfigure( $self->{_ch_hline}, -state => 'normal' );
-
-        my $atr_val = $scale->y_to_value($y);
-
-        $c->coords( $self->{_ch_box},
-            $pw, $y - 9, $scale->{canvas_width}, $y + 9 );
-        $c->itemconfigure( $self->{_ch_box}, -state => 'normal' );
-
-        $c->coords( $self->{_ch_label}, $pw + 4, $y );
-        $c->itemconfigure(
-            $self->{_ch_label},
-            -text  => sprintf( "%.4f", $atr_val ),
-            -state => 'normal',
-        );
-    }
-    else {
-        $c->itemconfigure( $self->{_ch_hline}, -state => 'hidden' );
-        $c->itemconfigure( $self->{_ch_box},   -state => 'hidden' );
-        $c->itemconfigure( $self->{_ch_label}, -state => 'hidden' );
+    if ($x > $x_sep) {
+        $c->itemconfigure('crosshair_atr', -state => 'hidden');
+        return;
     }
 
-    $time_str //= '';
-    my $label_w = 70;
-    my $y_time  = $ph + 1;
+    $c->coords($self->{_ch_vline}, $x, 0, $x, $h);
+    $c->itemconfigure($self->{_ch_vline}, -state => 'normal');
 
-    if ( $time_str ne '' ) {
-        $c->coords( $self->{_ch_time_box},
-            $x - $label_w / 2, $y_time,
-            $x + $label_w / 2, $y_time + 14 );
-        $c->itemconfigure( $self->{_ch_time_box}, -state => 'normal' );
-        $c->coords( $self->{_ch_time_label}, $x, $y_time + 1 );
-        $c->itemconfigure(
-            $self->{_ch_time_label},
-            -text  => $time_str,
-            -state => 'normal',
-        );
-    }
-    else {
-        $c->itemconfigure( $self->{_ch_time_box},   -state => 'hidden' );
-        $c->itemconfigure( $self->{_ch_time_label}, -state => 'hidden' );
-    }
+    $c->coords($self->{_ch_hline}, 0, $y, $x_sep, $y);
+    $c->itemconfigure($self->{_ch_hline}, -state => 'normal');
 
-    $c->raise('crosshair');
+    my $val = $scale->y_to_value($y);
+    my $lx  = $x_sep + 1;
+    my $lw  = $x_end - $x_sep - 2;
+    $c->coords($self->{_ch_label_bg}, $lx, $y-9, $lx+$lw, $y+9);
+    $c->itemconfigure($self->{_ch_label_bg}, -state => 'normal');
+    $c->coords($self->{_ch_label}, $lx + $lw/2, $y);
+    $c->itemconfigure($self->{_ch_label},
+        -text => sprintf('%.4f', $val), -state => 'normal');
+
+    $c->raise('crosshair_atr');
 }
 
 1;

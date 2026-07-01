@@ -1,250 +1,606 @@
-#!/usr/bin/perl
+# =============================================================================
+# market.pl
+# =============================================================================
+
 use strict;
 use warnings;
-use lib '.';
+use FindBin qw($Bin);
+use lib $Bin;
+
+use Tk;
+use Time::Moment;
 
 use Market::MarketData;
 use Market::IndicatorManager;
 use Market::Indicators::ATR;
+use Market::Panels::Scales;
+use Market::Panels::PricePanel;
+use Market::Panels::ATRPanel;
 use Market::ChartEngine;
+use Market::OverlayManager;
+use Market::Overlays::DemoOverlay;
+use Market::Replay;
 
-use Tk;
-use Tk::Frame;
-use Time::Moment;
+# --- Fase 2: motores analiticos y overlays SMC / Liquidez (Tabla 1) ---
+use Market::Indicators::Liquidity;
+use Market::Indicators::SMC_Structures;
+use Market::Overlays::SMC_Structures;
+use Market::Overlays::Liquidity;
 
-my $CSV_FILE   = 'data/2026_03.csv';
-my $ATR_PERIOD = 14;
-my $WINDOW_W   = 1200;
-my $WINDOW_H   = 700;
-my $PRICE_H    = 520;
-my $ATR_H      = 120;
-my $MARGIN_R   = 70;
+# =============================================================================
+# VENTANA
+# =============================================================================
+my $mw = MainWindow->new;
+$mw->title('Market Panel');
+$mw->resizable(1, 1);
+$mw->configure(-background => '#0f131a');
 
-# ═══════════════════════════════════════════════════════════
-# 1. CARGAR DATOS
-# ═══════════════════════════════════════════════════════════
+eval { $mw->state('zoomed') };
+eval { $mw->attributes('-zoomed', 1) };
+$mw->update;
 
-my $market = Market::MarketData->new();
+my $WIN_W = $mw->screenwidth;
+my $WIN_H = $mw->screenheight;
 
-open(my $fh, '<', $CSV_FILE)
-    or die "No se puede abrir '$CSV_FILE': $!\n";
+if ($mw->width < $WIN_W * 0.9) {
+    $mw->geometry("${WIN_W}x${WIN_H}+0+0");
+    $mw->update;
+}
 
-my $header = <$fh>;
+$WIN_W = $mw->width  if $mw->width  > 100;
+$WIN_H = $mw->height if $mw->height > 100;
 
-while (my $line = <$fh>) {
-    chomp $line;
-    next unless $line =~ /\S/;
+# =============================================================================
+# DIMENSIONES
+# =============================================================================
+my $PRICE_SCALE_W = 90;
+my $TF_BAR_H      = 28;
+my $ATR_H_MIN     = 60;
+my $ATR_H_MAX     = 400;
+my $ATR_H         = 140;
+my $CANVAS_W      = $WIN_W;
 
-    my ($time_str, $open, $high, $low, $close, $volume) = split /,/, $line;
-    next unless defined $close;
+# =============================================================================
+# LAYOUT
+# =============================================================================
+my $tf_frame = $mw->Frame(-background => '#151a24', -height => $TF_BAR_H)
+    ->pack(-fill => 'x', -side => 'top');
 
-    $time_str =~ s/^\s+|\s+$//g;
+my $canvas_price = $mw->Canvas(
+    -background         => '#0f131a',
+    -bd                 => 0,
+    -highlightthickness => 0,
+)->pack(-fill => 'both', -expand => 1, -side => 'top');
 
-    my $epoch;
-    eval {
-        my $tm = Time::Moment->from_string($time_str);
-        $epoch = $tm->epoch();
-    };
-    if ($@) {
-        warn "Timestamp inválido: '$time_str'\n";
-        next;
-    }
+my $sep_frame = $mw->Frame(
+    -background => '#2a3445',
+    -height     => 4,
+    -cursor     => 'sb_v_double_arrow',
+)->pack(-fill => 'x', -side => 'top');
 
-    for my $val ($open, $high, $low, $close) {
-        $val //= 0;
-        $val =~ s/^\s+|\s+$//g;
-    }
-    $volume //= 0;
-    $volume =~ s/^\s+|\s+$//g;
+my $canvas_atr = $mw->Canvas(
+    -height             => $ATR_H,
+    -background         => '#0f131a',
+    -bd                 => 0,
+    -highlightthickness => 0,
+)->pack(-fill => 'x', -side => 'top');
 
-    next unless $open && $high && $low && $close;
+# =============================================================================
+# DATOS
+# =============================================================================
+print "Cargando datos...\n";
+my $market = Market::MarketData->new;
 
+my $csv_path;
+for my $cand ("$Bin/data/2026_06_29.csv", "$Bin/2026_06_29.csv", "$Bin/../data/2026_06_29.csv") {
+    if (-f $cand) { $csv_path = $cand; last; }
+}
+die "No se encuentra 2026_06_29.csv\n" unless $csv_path;
+
+open my $fh, '<', $csv_path or die "Error abriendo CSV '$csv_path': $!\n";
+<$fh>;
+my $count = 0;
+while (<$fh>) {
+    chomp;
+    my ($time_str, $open, $high, $low, $close, $volume) = split /,/;
+    next unless defined $close && $close ne '';
+    my $tm;
+    eval { $tm = Time::Moment->from_string($time_str) };
+    next if $@;
     $market->add_candle({
-        time   => $epoch,
-        open   => $open   + 0,
-        high   => $high   + 0,
-        low    => $low    + 0,
-        close  => $close  + 0,
+        time   => $time_str,
+        ts     => $tm->epoch,
+        open   => $open  + 0,
+        high   => $high  + 0,
+        low    => $low   + 0,
+        close  => $close + 0,
         volume => $volume + 0,
     });
+    $count++;
 }
-close($fh);
+close $fh;
 
-die "CSV vacío o sin datos válidos.\n" unless $market->size() > 0;
-print "Cargadas " . $market->size() . " velas desde '$CSV_FILE'\n";
+printf "Cargadas %d velas de 1m\n", $count;
+$market->build_timeframes;
+printf "5m: %d  |  15m: %d\n",
+    scalar @{ $market->get_data->{'5m'} },
+    scalar @{ $market->get_data->{'15m'} };
 
-# ═══════════════════════════════════════════════════════════
-# 2. TEMPORALIDADES E INDICADORES
-# ═══════════════════════════════════════════════════════════
+# =============================================================================
+# INDICADORES
+# =============================================================================
+my $ind_manager = Market::IndicatorManager->new;
 
-$market->build_timeframes();
-print "Temporalidades construidas: 1m, 5m, 15m\n";
+# El ORDEN de registro importa: en cada vela, rebuild/update procesa los
+# indicadores en este orden. Liquidity necesita el ATR ya calculado (tolerancia
+# EQH/EQL) y SMC_Structures necesita los swings ya confirmados por Liquidity.
+my $atr_ind = Market::Indicators::ATR->new(14);
+my $liq_ind = Market::Indicators::Liquidity->new( atr => $atr_ind, k => 3 );
+my $smc_ind = Market::Indicators::SMC_Structures->new(
+    liquidity => $liq_ind, max_age => 50 );
 
-my $indicators = Market::IndicatorManager->new();
-$indicators->register('ATR', Market::Indicators::ATR->new($ATR_PERIOD));
-$indicators->update_last($market);
-print "ATR($ATR_PERIOD) calculado.\n";
+$ind_manager->register('atr',       $atr_ind);
+$ind_manager->register('liquidity', $liq_ind);
+$ind_manager->register('smc',       $smc_ind);
 
-# ═══════════════════════════════════════════════════════════
-# 3. VENTANA TK
-# ═══════════════════════════════════════════════════════════
+print "Calculando indicadores (ATR, Liquidity, SMC)...\n";
+$ind_manager->rebuild_all($market);
+printf "ATR: %d  |  swings: %d  |  eventos liq: %d  |  FVGs: %d\n",
+    scalar @{ $ind_manager->get('atr') },
+    scalar @{ $liq_ind->get_swings },
+    scalar @{ $liq_ind->get_events },
+    scalar @{ $smc_ind->get_fvgs };
 
-my $mw = MainWindow->new();
-$mw->title('Chart Engine');
-$mw->geometry("${WINDOW_W}x${WINDOW_H}");
-$mw->configure(-background => '#131722');
-$mw->resizable(1, 1);
+# =============================================================================
+# OVERLAYS — gestor + overlays reales SMC y Liquidez (Tabla 1, Fase 2)
+# Cada overlay solo DIBUJA estructuras ya calculadas por su indicador fuente
+# (separacion estricta calculo/render). Nacen OCULTOS: el usuario decide que
+# activar de forma independiente desde el menu de herramientas.
+# =============================================================================
+my $overlay_mgr = Market::OverlayManager->new;
+my $smc_overlay = Market::Overlays::SMC_Structures->new(
+    source => $smc_ind, max_age => 50 );
+my $liq_overlay = Market::Overlays::Liquidity->new( source => $liq_ind );
+$overlay_mgr->register('smc',       $smc_overlay, visible => 0);
+$overlay_mgr->register('liquidity', $liq_overlay, visible => 0);
 
-# ── CAMBIO 1: MAXIMIZAR AUTOMÁTICAMENTE AL ARRANCAR ──
-# Esta es la instrucción nativa ideal para entornos Linux (Fedora/GNOME/WSLg)
-$mw->attributes('-zoomed' => 1);
-
-# Toolbar
-my $toolbar = $mw->Frame(
-    -background => '#1e222d',
-    -relief     => 'flat',
-)->pack(-side => 'top', -fill => 'x', -ipady => 4);
-
-$toolbar->Label(
-    -text       => 'Temporalidad:',
-    -foreground => '#888888',
-    -background => '#1e222d',
-    -font       => ['sans-serif', 9],
-)->pack(-side => 'left', -padx => 10);
-
-# Área de canvas
-my $chart_frame = $mw->Frame(
-    -background => '#131722',
-)->pack(-side => 'top', -fill => 'both', -expand => 1);
-
-# El orden de empaquetado actual es perfecto para el comportamiento elástico:
-# ATR se queda abajo fijo, y el Canvas de Precios se estira en todo el espacio sobrante.
-my $canvas_atr = $chart_frame->Canvas(
-    -width              => $WINDOW_W,
-    -height             => $ATR_H,
-    -background         => '#131722',
-    -relief             => 'flat',
-    -bd                 => 0,
-    -highlightthickness => 0,
-)->pack(-side => 'bottom', -fill => 'x');
-
-$chart_frame->Frame(
-    -background => '#2a2e39',
-    -height     => 1,
-)->pack(-side => 'bottom', -fill => 'x');
-
-my $canvas_price = $chart_frame->Canvas(
-    -width              => $WINDOW_W,
-    -height             => $PRICE_H,
-    -background         => '#131722',
-    -relief             => 'flat',
-    -bd                 => 0,
-    -highlightthickness => 0,
-)->pack(-side => 'top', -fill => 'both', -expand => 1);
-
-# Barra de estado
-my $statusbar = $mw->Frame(
-    -background => '#1e222d',
-)->pack(-side => 'bottom', -fill => 'x', -ipady => 2);
-
-my $status_label = $statusbar->Label(
-    -text       => 'Listo  |  Rueda: zoom  |  Drag izq: scroll  |  Drag der: mover precio  |  R: reset',
-    -foreground => '#888888',
-    -background => '#1e222d',
-    -font       => ['monospace', 8],
-    -anchor     => 'w',
-)->pack(-side => 'left', -padx => 10);
-
-# ═══════════════════════════════════════════════════════════
-# 4. CHART ENGINE
-# ═══════════════════════════════════════════════════════════
-
-my $engine = Market::ChartEngine->new(
-    market_data    => $market,
-    indicators     => $indicators,
-    canvas_price   => $canvas_price,
-    canvas_atr     => $canvas_atr,
-    canvas_w       => $WINDOW_W,
-    canvas_price_h => $PRICE_H,
-    canvas_atr_h   => $ATR_H,
-    margin_right   => $MARGIN_R,
-    visible_bars   => 100,
+# =============================================================================
+# PANELES Y MOTOR
+# =============================================================================
+my $price_panel = Market::Panels::PricePanel->new(
+    canvas        => $canvas_price,
+    price_scale_w => $PRICE_SCALE_W,
+);
+my $atr_panel = Market::Panels::ATRPanel->new(
+    canvas        => $canvas_atr,
+    price_scale_w => $PRICE_SCALE_W,
 );
 
-# Nota: Los binds individuales aquí siguen siendo válidos, pero recuerda que el 
-# nuevo ChartEngine los gestiona de manera global y robusta internamente.
-$mw->bind('<Key-1>', sub { $engine->set_timeframe('1');  });
-$mw->bind('<Key-5>', sub { $engine->set_timeframe('5');  });
-$mw->bind('<Key-6>', sub { $engine->set_timeframe('15'); });
-$mw->bind('<Key-a>', sub { $engine->set_view_mode('auto');   });
-$mw->bind('<Key-A>', sub { $engine->set_view_mode('auto');   });
-$mw->bind('<Key-m>', sub { $engine->set_view_mode('manual'); });
-$mw->bind('<Key-M>', sub { $engine->set_view_mode('manual'); });
-$mw->bind('<Key-r>', sub { $engine->reset_view(); });
-$mw->bind('<Key-R>', sub { $engine->reset_view(); });
+my $engine = Market::ChartEngine->new(
+    market         => $market,
+    indicators     => $ind_manager,
+    overlays       => $overlay_mgr,
+    canvas_price   => $canvas_price,
+    canvas_atr     => $canvas_atr,
+    price_panel    => $price_panel,
+    atr_panel      => $atr_panel,
+    canvas_w       => $CANVAS_W,
+    canvas_price_h => 0,
+    canvas_atr_h   => $ATR_H,
+);
 
-# ═══════════════════════════════════════════════════════════
-# 5. BOTONES DE TIMEFRAME
-# ═══════════════════════════════════════════════════════════
+# =============================================================================
+# REPLAY (Etapa 3, Fase 2)
+# Los widgets referenciados en on_change se declaran aqui pero se crean
+# mas abajo, en la barra $tf_frame -- mismo patron de closures que
+# ya usa este archivo para sincronizar $mode_btn/$mode_btn_atr.
+# =============================================================================
+my ( $replay_status_lbl, $btn_replay_play, $btn_replay_pause,
+     $btn_replay_step_fwd, $btn_replay_step_back, $btn_replay_fast,
+     $btn_replay_exit );
 
-for my $tf (['1m', '1'], ['5m', '5'], ['15m', '15']) {
-    my ($label, $value) = @$tf;
-    $toolbar->Button(
-        -text             => $label,
-        -foreground       => '#cccccc',
-        -background       => '#2a2e39',
-        -activeforeground => '#ffffff',
-        -activebackground => '#364156',
-        -relief           => 'flat',
-        -font             => ['sans-serif', 9, 'bold'],
-        -padx             => 10,
-        -command          => sub {
-            $engine->set_timeframe($value);
-            $status_label->configure(-text => "Temporalidad: ${label}");
-        },
-    )->pack(-side => 'left', -padx => 2);
-}
+my $replay;
+$replay = Market::Replay->new(
+    market     => $market,
+    indicators => $ind_manager,
+    schedule   => sub { $canvas_price->after(@_); },
+    on_change  => sub {
+        $engine->follow_replay_pointer;
 
-$toolbar->Button(
-    -text             => 'Reset',
-    -foreground       => '#cccccc',
-    -background       => '#2a2e39',
+        my $active  = $replay->is_active;
+        my $playing = $replay->is_playing;
+
+        if ($replay_status_lbl) {
+            my $text = !$active
+                ? 'EN VIVO (replay inactivo)'
+                : sprintf(
+                    'REPLAY %s | %s',
+                    Time::Moment->from_epoch($replay->current_ts)
+                        ->with_offset_same_instant(-300)->strftime('%Y-%m-%d %H:%M:%S'),
+                    ($playing ? ($replay->is_fast ? 'FAST FORWARD' : 'PLAY') : 'PAUSADO'),
+                );
+            $replay_status_lbl->configure(-text => $text);
+        }
+
+        for my $pair (
+            [ $btn_replay_play,       $active ],
+            [ $btn_replay_pause,      $active && $playing ],
+            [ $btn_replay_step_fwd,   $active && !$playing ],
+            [ $btn_replay_step_back,  $active && !$playing ],
+            [ $btn_replay_fast,       $active ],
+            [ $btn_replay_exit,       $active ],
+        ) {
+            my ($btn, $enabled) = @$pair;
+            next unless $btn;
+            $btn->configure(-state => $enabled ? 'normal' : 'disabled');
+        }
+    },
+);
+
+# =============================================================================
+# TOOLBAR — se crea ANTES de registrar callbacks para que los botones existan
+# =============================================================================
+my %bs = (
+    -background       => '#151a24',
+    -foreground       => '#d6dbe6',
+    -activebackground => '#222b3a',
     -activeforeground => '#ffffff',
-    -activebackground => '#364156',
     -relief           => 'flat',
-    -font             => ['sans-serif', 9],
-    -padx             => 10,
-    -command          => sub { $engine->reset_view(); },
-)->pack(-side => 'left', -padx => 2);
+    -bd               => 0,
+    -font             => 'TkDefaultFont 9',
+    -padx             => 5,
+    -pady             => 3,
+);
 
-# ═══════════════════════════════════════════════════════════
-# 6. RESIZE — CAMBIO 2: OPTIMIZACIÓN RESPONSIVA
-# ═══════════════════════════════════════════════════════════
+my $toolbar_left = $tf_frame->Frame(-background => '#151a24')
+    ->pack(-side => 'left', -fill => 'x');
 
-my $last_configure_w = 0;
-my $last_configure_h = 0;
+# --- Boton modo precio ---
+my $mode_btn;
+$mode_btn = $toolbar_left->Button(%bs,
+    -text       => 'Panel:Auto',
+    -foreground => '#26a69a',
+    -font       => 'TkDefaultFont 9 bold',
+    -command    => sub {
+        my $is_free = $engine->toggle_free_mode_price;
+        # El callback se encarga de actualizar el boton
+    },
+)->pack(-side => 'left', -padx => 4, -pady => 2);
 
-$mw->bind('<Configure>', sub {
-    my $new_w = $mw->width();
-    my $new_h = $mw->height();
-    
-    # Si las dimensiones no han cambiado realmente, ignoramos el evento
-    return if $new_w == $last_configure_w && $new_h == $last_configure_h;
-    $last_configure_w = $new_w;
-    $last_configure_h = $new_h;
+# --- Boton modo ATR ---
+my $mode_btn_atr;
+$mode_btn_atr = $toolbar_left->Button(%bs,
+    -text       => 'ATR:Auto',
+    -foreground => '#26a69a',
+    -font       => 'TkDefaultFont 9 bold',
+    -command    => sub {
+        my $is_free = $engine->toggle_free_mode_atr;
+        # El callback se encarga de actualizar el boton
+    },
+)->pack(-side => 'left', -padx => 4, -pady => 2);
 
-    # Ya no inyectamos manualmente las variables a las escalas de forma dura desde aquí,
-    # ya que el método render() actualizado del Engine las lee en tiempo real directamente
-    # desde el tamaño físico de los Canvas. Solo disparamos la petición de refresco.
-    $engine->request_render();
+$toolbar_left->Frame(-background => '#2a3445', -width => 1, -height => 16)
+    ->pack(-side => 'left', -pady => 5, -padx => 6);
+
+# =============================================================================
+# CALLBACKS DE MODO — sincronizan botones con estado interno del engine
+# Cualquier cambio de modo (boton, regleta, dbl-clic) actualiza el boton.
+# =============================================================================
+$engine->set_mode_callbacks(
+    sub {   # callback precio
+        my ($is_free) = @_;
+        $mode_btn->configure(
+            -text       => $is_free ? 'Panel:Manual' : 'Panel:Auto',
+            -foreground => $is_free ? '#ef5350'  : '#26a69a',
+        );
+    },
+    sub {   # callback ATR
+        my ($is_free) = @_;
+        $mode_btn_atr->configure(
+            -text       => $is_free ? 'ATR:Manual' : 'ATR:Auto',
+            -foreground => $is_free ? '#ef5350'    : '#26a69a',
+        );
+    },
+);
+
+# =============================================================================
+# TEMPORALIDADES
+# =============================================================================
+my $active_tf = '1m';
+my $tf_lbl = $toolbar_left->Label(%bs,
+    -text       => '',
+    -foreground => '#4f8cff',
+    -font       => 'TkDefaultFont 9 bold',
+)->pack(-side => 'left', -padx => 4, -pady => 2);
+
+my %tf_btns;
+for my $tf (qw(1m 5m 15m 1h 2h 4h D W)) {
+    my $btn = $toolbar_left->Button(%bs,
+        -text    => $tf,
+        -font    => 'TkDefaultFont 9 bold',
+        -command => sub {
+            return if $active_tf eq $tf;
+            $active_tf = $tf;
+            $tf_lbl->configure(-text => $tf);
+            for my $k (keys %tf_btns) {
+                $tf_btns{$k}->configure(
+                    -foreground => ($k eq $tf ? '#4f8cff' : '#d6dbe6')
+                );
+            }
+            $engine->set_timeframe($tf);
+
+            # Resetear botones de modo a Auto
+            $mode_btn->configure(
+                -text       => 'Panel:Auto',
+                -foreground => '#26a69a',
+            );
+            $mode_btn_atr->configure(
+                -text       => 'ATR:Auto',
+                -foreground => '#26a69a',
+            );
+        },
+    )->pack(-side => 'left', -padx => 1, -pady => 2);
+    $tf_btns{$tf} = $btn;
+}
+$tf_btns{'1m'}->configure(-foreground => '#4f8cff');
+
+
+
+# =============================================================================
+# CONTROLES DE REPLAY (Etapa 3, Fase 2)
+# =============================================================================
+$toolbar_left->Frame(-background => '#2a3445', -width => 1, -height => 16)
+    ->pack(-side => 'left', -pady => 5, -padx => 6);
+
+my $replay_selected_ts;  # ts de la vela elegida, undef si no hay seleccion
+
+my $replay_date_lbl = $toolbar_left->Label(%bs,
+    -text       => '—',
+    -foreground => '#ffd700',
+    -font       => 'TkFixedFont 9',
+)->pack(-side => 'left', -padx => 4);
+
+my $btn_replay_start;
+$btn_replay_start = $toolbar_left->Button(%bs,
+    -text    => 'Replay',
+    -command => sub {
+        $engine->set_replay_select_mode(1);
+        $btn_replay_start->configure(-foreground => '#ffd700');
+        $replay_date_lbl->configure(-text => 'clic en vela...');
+    },
+)->pack(-side => 'left', -padx => 4, -pady => 2);
+
+$engine->set_replay_click_cb(sub {
+    my ($ts) = @_;
+    $replay_selected_ts = $ts;
+    $btn_replay_start->configure(-foreground => '#d6dbe6');
+    my $fecha = Time::Moment->from_epoch($ts)
+        ->with_offset_same_instant(-300)
+        ->strftime('%Y-%m-%d %H:%M');
+    $replay_date_lbl->configure(-text => $fecha);
+    # Habilitar Play para que el usuario confirme
+    $btn_replay_play->configure(-state => 'normal');
 });
 
-# ═══════════════════════════════════════════════════════════
-# 7. ARRANQUE
-# ═══════════════════════════════════════════════════════════
+$toolbar_left->Frame(-background => '#2a3445', -width => 1, -height => 16)
+    ->pack(-side => 'left', -pady => 5, -padx => 6);
 
-print "Iniciando ventana gráfica...\n";
+$btn_replay_step_back = $toolbar_left->Button(%bs,
+    -text    => '|< Step',
+    -state   => 'disabled',
+    -command => sub { $replay->step_backward(1); },
+)->pack(-side => 'left', -padx => 1, -pady => 2);
 
-$mw->update;
-$engine->request_render();
-MainLoop();
+$btn_replay_play = $toolbar_left->Button(%bs,
+    -text    => 'Play',
+    -state   => 'disabled',
+    -command => sub {
+        if ( defined $replay_selected_ts && !$replay->is_active ) {
+            $replay->start($replay_selected_ts);
+        }
+        $replay->play if $replay->is_active;
+    },
+)->pack(-side => 'left', -padx => 1, -pady => 2);
+
+$btn_replay_pause = $toolbar_left->Button(%bs,
+    -text    => 'Pause',
+    -state   => 'disabled',
+    -command => sub { $replay->pause; },
+)->pack(-side => 'left', -padx => 1, -pady => 2);
+
+$btn_replay_step_fwd = $toolbar_left->Button(%bs,
+    -text    => 'Step >|',
+    -state   => 'disabled',
+    -command => sub { $replay->step_forward(1); },
+)->pack(-side => 'left', -padx => 1, -pady => 2);
+
+$btn_replay_fast = $toolbar_left->Button(%bs,
+    -text    => 'Fast Forward >>',
+    -state   => 'disabled',
+    -command => sub { $replay->fast_forward; },
+)->pack(-side => 'left', -padx => 1, -pady => 2);
+
+$toolbar_left->Frame(-background => '#2a3445', -width => 1, -height => 16)
+    ->pack(-side => 'left', -pady => 5, -padx => 6);
+
+$btn_replay_exit = $toolbar_left->Button(%bs,
+    -text       => 'Exit Replay',
+    -foreground => '#ef5350',
+    -state      => 'disabled',
+    -command    => sub {
+        $replay->exit_replay;
+        $replay_selected_ts = undef;
+        $replay_date_lbl->configure(-text => '—');
+    },
+)->pack(-side => 'left', -padx => 4, -pady => 2);
+
+$replay_status_lbl = $toolbar_left->Label(%bs,
+    -text       => 'EN VIVO (replay inactivo)',
+    -foreground => '#d6dbe6',
+    -font       => 'TkDefaultFont 9 bold',
+);
+# No se hace pack: el label existe pero no se muestra
+
+# =============================================================================
+# DRAG DEL SEPARADOR ATR
+# =============================================================================
+{
+    my $drag_y_start = undef;
+    my $drag_atr_h   = undef;
+
+    $sep_frame->bind('<ButtonPress-1>', sub {
+        $drag_y_start = $_[0]->XEvent->Y;
+        $drag_atr_h   = $canvas_atr->height;
+    });
+
+    $sep_frame->bind('<B1-Motion>', sub {
+        return unless defined $drag_y_start;
+        my $dy    = $drag_y_start - $_[0]->XEvent->Y;
+        my $new_h = $drag_atr_h + $dy;
+        $new_h = $ATR_H_MIN if $new_h < $ATR_H_MIN;
+        $new_h = $ATR_H_MAX if $new_h > $ATR_H_MAX;
+
+        $canvas_atr->configure(-height => $new_h);
+        $engine->resize_panels(
+            $canvas_price->width,
+            $canvas_price->height - ($new_h - $drag_atr_h),
+            $new_h,
+        );
+    });
+
+    $sep_frame->bind('<ButtonRelease-1>', sub {
+        $drag_y_start = undef;
+        $drag_atr_h   = undef;
+    });
+
+    $sep_frame->bind('<Double-Button-1>', sub {
+        $canvas_atr->configure(-height => 140);
+        $mw->update;
+        $engine->resize_panels(
+            $canvas_price->width,
+            $canvas_price->height,
+            140,
+        );
+    });
+}
+
+# =============================================================================
+# MENU DE HERRAMIENTAS / OVERLAYS (Fase 2)
+# Cada herramienta tiene su PROPIO estado de activacion: marcar una opcion
+# NUNCA activa las demas. La visibilidad de un overlay completo = (alguna de
+# sus sub-opciones activa). El menu SOLO administra estados y dispara render;
+# no calcula ni dibuja directamente.
+# =============================================================================
+my $BAR_BG   = '#111722';
+my $PANEL_BG = '#151a24';
+
+my %BBS = (
+    -background       => $BAR_BG,
+    -activebackground => '#222b3a',
+    -activeforeground => '#ffffff',
+    -foreground       => '#d6dbe6',
+    -relief           => 'flat',
+    -bd               => 0,
+    -font             => 'TkDefaultFont 9',
+    -padx             => 5,
+    -pady             => 2,
+);
+
+# --- Fila "Herramientas:" con el toggle del panel ---
+my $tools_bar = $mw->Frame(-background => $BAR_BG);
+$tools_bar->pack(-side => 'top', -fill => 'x', -before => $canvas_price);
+
+
+# --- Helpers de construccion del menu ---
+my $make_col = sub {
+    my ($title, $color) = @_;
+    my $col = $tools_bar->Frame(-background => $BAR_BG);
+    $col->pack(-side => 'left', -anchor => 'w', -padx => 6, -pady => 2);
+    $col->Label(-text => $title, -background => $BAR_BG, -foreground => $color,
+        -font => 'TkDefaultFont 9 bold')->pack(-side => 'left', -padx => 4);
+    return $col;
+};
+my $make_chk = sub {
+    my ($parent, $text, $varref, $cmd, $disabled) = @_;
+    my $cb = $parent->Checkbutton(
+        -text => $text, -variable => $varref, -onvalue => 1, -offvalue => 0,
+        -background => $BAR_BG, -activebackground => $BAR_BG,
+        -foreground => '#d6dbe6', -activeforeground => '#ffffff',
+        -selectcolor => '#4f8cff',
+        -font => 'TkDefaultFont 8', -anchor => 'w',
+        ( $cmd ? ( -command => $cmd ) : () ),
+    );
+    $cb->configure(-state => 'disabled') if $disabled;
+    $cb->pack(-side => 'left', -anchor => 'w', -padx => 2);
+    return $cb;
+};
+
+# =============================================================================
+# Columna SMC STRUCTURES (BOS / CHoCH / FVG)
+# =============================================================================
+my %SMC = ( show_fvg => 0, show_bos => 0, show_choch => 0 );
+my $smc_master = 0;
+my $refresh_smc = sub {
+    $smc_overlay->set_flag($_, $SMC{$_}) for keys %SMC;
+    my $any = ( $SMC{show_fvg} || $SMC{show_bos} || $SMC{show_choch} ) ? 1 : 0;
+    $overlay_mgr->set_visible('smc', $any);
+    $engine->request_render;
+};
+my $sync_smc_master = sub {
+    $smc_master =
+        ( $SMC{show_fvg} && $SMC{show_bos} && $SMC{show_choch} ) ? 1 : 0;
+};
+my $leaf_smc = sub { $refresh_smc->(); $sync_smc_master->(); };
+
+my $col_smc = $make_col->('SMC Structures', '#4f8cff');
+$make_chk->($col_smc, 'Activar SMC', \$smc_master, sub {
+    $SMC{$_} = $smc_master for keys %SMC;   # master = encender/apagar TODO SMC
+    $refresh_smc->();
+});
+$make_chk->($col_smc, 'BOS',       \$SMC{show_bos},   $leaf_smc);
+$make_chk->($col_smc, 'CHoCH',     \$SMC{show_choch}, $leaf_smc);
+$make_chk->($col_smc, 'FVG',       \$SMC{show_fvg},   $leaf_smc);
+
+$tools_bar->Frame(-background => '#2a3445', -width => 1, -height => 16)
+    ->pack(-side => 'left', -pady => 4, -padx => 4);
+
+# =============================================================================
+# Columna LIQUIDITY (Swing / BSL / SSL / EQH / EQL / Sweeps / Grabs / Runs)
+# =============================================================================
+my %LIQ = (
+    show_swing => 0, show_bsl => 0, show_ssl => 0, show_eqh => 0,
+    show_eql => 0, show_sweeps => 0, show_grabs => 0, show_runs => 0,
+);
+my $liq_master = 0;
+my $refresh_liq = sub {
+    $liq_overlay->set_flag($_, $LIQ{$_}) for keys %LIQ;
+    my $any = 0; $any ||= $LIQ{$_} for keys %LIQ;
+    $overlay_mgr->set_visible('liquidity', $any ? 1 : 0);
+    $engine->request_render;
+};
+my $sync_liq_master = sub {
+    my $all = 1; $all &&= $LIQ{$_} for keys %LIQ;
+    $liq_master = $all ? 1 : 0;
+};
+my $leaf_liq = sub { $refresh_liq->(); $sync_liq_master->(); };
+
+my $col_liq = $make_col->('Liquidity', '#ef5350');
+$make_chk->($col_liq, 'Activar Liquidity', \$liq_master, sub {
+    $LIQ{$_} = $liq_master for keys %LIQ;
+    $refresh_liq->();
+});
+$make_chk->($col_liq, 'Swing Points',  \$LIQ{show_swing},  $leaf_liq);
+$make_chk->($col_liq, 'BSL - Buy Side',  \$LIQ{show_bsl},  $leaf_liq);
+$make_chk->($col_liq, 'SSL - Sell Side', \$LIQ{show_ssl},  $leaf_liq);
+$make_chk->($col_liq, 'EQH',     \$LIQ{show_eqh},    $leaf_liq);
+$make_chk->($col_liq, 'EQL',     \$LIQ{show_eql},    $leaf_liq);
+$make_chk->($col_liq, 'Sweeps',  \$LIQ{show_sweeps}, $leaf_liq);
+$make_chk->($col_liq, 'Grabs',   \$LIQ{show_grabs},  $leaf_liq);
+$make_chk->($col_liq, 'Runs',    \$LIQ{show_runs},   $leaf_liq);
+
+# =============================================================================
+# PRIMER RENDER
+# =============================================================================
+$engine->reset_view;
+$mw->after(80, sub { $engine->render });
+MainLoop;

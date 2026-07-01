@@ -1,91 +1,71 @@
 package Market::Panels::PricePanel;
+
 use strict;
 use warnings;
+use POSIX qw(floor);
 
-# ─── Constructor ──────────────────────────────────────────────────────────────
+use constant {
+    COLOR_BULL     => '#26a69a',
+    COLOR_BEAR     => '#ef5350',
+    COLOR_BULL_BDR => '#1a7a72',
+    COLOR_BEAR_BDR => '#c62828',
+    COLOR_CROSS    => '#8b95a7',
+    COLOR_FG       => '#d6dbe6',
+    COLOR_GRID     => '#222b3a',
+    COLOR_LAST_BG  => '#ff0000',
+    COLOR_INFO     => '#d6dbe6',
+    BG_COLOR       => '#0f131a',
+    MIN_BODY_H     => 1,
+};
+
 sub new {
     my ( $class, %args ) = @_;
     my $self = {
-        canvas      => $args{canvas},
-        scale       => $args{scale},
-        market_data => $args{market_data},
-        indicators  => $args{indicators},
-
-        color_bull      => $args{color_bull}      // '#26a69a',
-        color_bear      => $args{color_bear}      // '#ef5350',
-        color_wick      => $args{color_wick}      // '#888888',
-        color_crosshair => $args{color_crosshair} // '#ffffff',
-        color_price_tag => $args{color_price_tag} // '#131722',
-
-        _ch_hline      => undef,
-        _ch_vline      => undef,
-        _ch_label      => undef,
-        _ch_box        => undef,
-        _ch_time_box   => undef,
-        _ch_time_label => undef,
+        canvas        => $args{canvas},
+        scale         => undef,
+        price_scale_w => $args{price_scale_w} // 90,
+        _ch_hline    => undef,
+        _ch_vline    => undef,
+        _ch_label_bg => undef,
+        _ch_label    => undef,
+        _ohlcv_label => undef,
+        _time_label_bg => undef,
+        _time_label    => undef,
+        _cross_ready => 0,
     };
     bless $self, $class;
-    $self->_init_crosshair_objects();
     return $self;
 }
 
 sub _init_crosshair_objects {
     my ($self) = @_;
     my $c = $self->{canvas};
-
-    $self->{_ch_hline} = $c->createLine(
-        0, 0, 0, 0,
-        -fill  => $self->{color_crosshair},
-        -dash  => [ 4, 4 ],
-        -width => 1,
-        -state => 'hidden',
-        -tags  => ['crosshair'],
-    );
+    return unless $c;
+    return if $self->{_cross_ready};
 
     $self->{_ch_vline} = $c->createLine(
-        0, 0, 0, 0,
-        -fill  => $self->{color_crosshair},
-        -dash  => [ 4, 4 ],
-        -width => 1,
-        -state => 'hidden',
-        -tags  => ['crosshair'],
+        0, 0, 0, 1, -fill => COLOR_CROSS, -dash => [ 4, 4 ], -state => 'hidden', -tags => ['crosshair_price'],
     );
-
-    $self->{_ch_box} = $c->createRectangle(
-        0, 0, 0, 0,
-        -fill    => $self->{color_crosshair},
-        -outline => $self->{color_crosshair},
-        -state   => 'hidden',
-        -tags    => ['crosshair'],
+    $self->{_ch_hline} = $c->createLine(
+        0, 0, 1, 0, -fill => COLOR_CROSS, -dash => [ 4, 4 ], -state => 'hidden', -tags => ['crosshair_price'],
     );
-
+    $self->{_ch_label_bg} = $c->createRectangle(
+        0, 0, 1, 1, -fill => '#222b3a', -outline => '#222b3a', -state => 'hidden', -tags => ['crosshair_price'],
+    );
     $self->{_ch_label} = $c->createText(
-        0, 0,
-        -text   => '',
-        -fill   => $self->{color_price_tag},
-        -font   => [ 'monospace', 8, 'bold' ],
-        -anchor => 'w',
-        -state  => 'hidden',
-        -tags   => ['crosshair'],
+        0, 0, -text => '', -fill => '#ffffff', -anchor => 'center', -font => 'TkFixedFont 8 bold', -state => 'hidden', -tags => ['crosshair_price'],
+    );
+    $self->{_ohlcv_label} = $c->createText(
+        8, 6, -text => '', -fill => COLOR_INFO, -anchor => 'nw', -font => 'TkFixedFont 8', -state => 'hidden', -tags => ['ohlcv_label'],
+    );
+    $self->{_time_label_bg} = $c->createRectangle(
+        0, 0, 1, 1, -fill => '#222b3a', -outline => '#222b3a', -state => 'hidden', -tags => ['time_label'],
+    );
+    $self->{_time_label} = $c->createText(
+        0, 0, -text => '', -fill => '#ffffff', -anchor => 'center', -font => 'TkFixedFont 8', -state => 'hidden', -tags => ['time_label'],
     );
 
-    $self->{_ch_time_box} = $c->createRectangle(
-        0, 0, 1, 1,
-        -fill    => $self->{color_crosshair},
-        -outline => $self->{color_crosshair},
-        -state   => 'hidden',
-        -tags    => ['crosshair'],
-    );
-
-    $self->{_ch_time_label} = $c->createText(
-        0, 0,
-        -text   => '',
-        -fill   => $self->{color_price_tag},
-        -font   => [ 'monospace', 8, 'bold' ],
-        -anchor => 'n',
-        -state  => 'hidden',
-        -tags   => ['crosshair'],
-    );
+    $self->{_cross_ready} = 1;
 }
 
 sub round {
@@ -94,250 +74,359 @@ sub round {
     return sprintf( "%.${decimals}f", $value ) + 0;
 }
 
-sub get_y_range {
-    my ( $self, $data ) = @_;
-    return ( 0, 1 ) unless @$data;
-
-    my $min = 9**9**9;
-    my $max = -9**9**9;
-
-    for my $candle (@$data) {
-        $min = $candle->{low}  if $candle->{low}  < $min;
-        $max = $candle->{high} if $candle->{high} > $max;
-    }
-
-    my $padding = ( $max - $min ) * 0.05;
-    $padding = 0.001 if $padding == 0;
-
-    return ( $min - $padding, $max + $padding );
-}
-
 sub set_scale {
     my ( $self, $scale ) = @_;
     $self->{scale} = $scale;
 }
 
-# ─── render ───────────────────────────────────────────────────────────────────
-# $data_start: índice absoluto del primer elemento de $data en el array global.
-# Puede diferir de scale->{offset} cuando hay espacio vacío a la izquierda
-# (scale->{offset} puede ser negativo, pero $data_start >= 0 siempre).
-sub render {
-    my ( $self, $canvas, $data, $scale, $data_start ) = @_;
-    $data_start //= $scale->{offset};
-    $data_start = 0 if $data_start < 0;
+sub get_y_range {
+    my ( $self, $data ) = @_;
+    return ( 0, 1 ) unless $data && @$data;
 
-    $canvas->delete('candle');
-    $canvas->delete('scale_y');
-    $canvas->delete('last_price');
-
-    my $bar_w  = $scale->bar_width();
-    my $body_w = $bar_w;
-    $body_w *= 0.95 if $bar_w > 3;
-
-    for my $i ( 0 .. $#$data ) {
-        my $candle  = $data->[$i];
-        my $abs_idx = $data_start + $i;
-
-        # Coordenadas X basadas en el índice absoluto
-        my $cx    = $scale->index_to_center_x($abs_idx);
-        my $left  = $cx - $body_w / 2;
-        my $right = $cx + $body_w / 2;
-
-        my $y_open  = $scale->value_to_y( $candle->{open} );
-        my $y_close = $scale->value_to_y( $candle->{close} );
-        my $y_high  = $scale->value_to_y( $candle->{high} );
-        my $y_low   = $scale->value_to_y( $candle->{low} );
-
-        my $is_bull = $candle->{close} >= $candle->{open};
-        my $color   = $is_bull ? $self->{color_bull} : $self->{color_bear};
-
-        my $body_top    = $is_bull ? $y_close : $y_open;
-        my $body_bottom = $is_bull ? $y_open  : $y_close;
-
-        $canvas->createLine(
-            $cx, $y_high,
-            $cx, $y_low,
-            -fill  => $self->{color_wick},
-            -width => 1,
-            -tags  => ['candle'],
-        );
-
-        if ( abs( $body_bottom - $body_top ) < 1 ) {
-            $canvas->createLine(
-                $left,  $body_top,
-                $right, $body_top,
-                -fill  => $color,
-                -width => 1,
-                -tags  => ['candle'],
-            );
-        }
-        else {
-            $canvas->createRectangle(
-                $left,  $body_top,
-                $right, $body_bottom,
-                -fill    => $color,
-                -outline => $color,
-                -tags    => ['candle'],
-            );
-        }
+    my $max_p = $data->[0]{high};
+    my $min_p = $data->[0]{low};
+    for my $c (@$data) {
+        $max_p = $c->{high} if $c->{high} > $max_p;
+        $min_p = $c->{low}  if $c->{low} < $min_p;
     }
 
+    my $margin = ( $max_p - $min_p ) * 0.03;
+    $margin = 1 if $margin < 1;
+
+    return ( $min_p - $margin, $max_p + $margin );
+}
+
+sub render {
+    my ( $self, $canvas, $data, $scale ) = @_;
+    return unless $data && @$data;
+
+    $canvas->delete('candle');
+    $canvas->delete('price_bg');
+
+    $canvas->createRectangle(
+        0,                  0,
+        $scale->{canvas_w}, $scale->{canvas_h},
+        -fill    => BG_COLOR,
+        -outline => BG_COLOR,
+        -tags    => ['price_bg'],
+    );
+
     $scale->_draw_y_scale($canvas);
-    $self->render_last_visible_price( $canvas, $data, $scale );
+
+    my $bar_w  = $scale->_plot_w / $scale->{visible_bars};
+    my $body_w = $bar_w * 0.65;
+    $body_w = 1 if $body_w < 1;
+    my $thin = ( $bar_w < 3 ) ? 1 : 0;
+
+    # FIX: offset puede ser FRACCIONARIO (zoom anclado con Ctrl), pero el
+    # array $data fue recortado en un indice ENTERO (slice_start). Usar
+    # offset aqui desplazaria las velas en la magnitud del residuo
+    # fraccionario. Si slice_start no viene (compatibilidad con llamadas
+    # que no lo pasen), se cae al comportamiento original de Fase 1.
+    my $start_idx = defined $scale->{slice_start}
+        ? $scale->{slice_start}
+        : ( $scale->{offset} < 0 ? 0 : $scale->{offset} );
+
+    for my $i ( 0 .. $#$data ) {
+        my $c   = $data->[$i];
+        my $idx = $i + $start_idx;
+        my $cx  = $scale->index_to_center_x($idx);
+
+        next if ( $c->{low} > $scale->{max_val} );
+        next if ( $c->{high} < $scale->{min_val} );
+
+        my $y_open  = $scale->value_to_y( $c->{open} );
+        my $y_high  = $scale->value_to_y( $c->{high} );
+        my $y_low   = $scale->value_to_y( $c->{low} );
+        my $y_close = $scale->value_to_y( $c->{close} );
+
+        my $bull  = ( $c->{close} >= $c->{open} );
+        my $color = $bull ? COLOR_BULL : COLOR_BEAR;
+        my $border = $thin ? $color : ( $bull ? COLOR_BULL_BDR : COLOR_BEAR_BDR );
+
+        my $y_top  = ( $y_close < $y_open ) ? $y_close : $y_open;
+        my $y_bot  = ( $y_close > $y_open ) ? $y_close : $y_open;
+        my $body_h = $y_bot - $y_top;
+        $body_h = MIN_BODY_H if $body_h < MIN_BODY_H;
+
+        $canvas->createRectangle(
+            $cx - $body_w / 2, $y_top,
+            $cx + $body_w / 2, $y_top + $body_h,
+            -fill    => $color,
+            -outline => $border,
+            -tags    => ['candle'],
+        );
+
+        $canvas->createLine(
+            $cx, $y_high, $cx, $y_top,
+            -fill => $color,
+            -tags => ['candle']
+        );
+
+        $canvas->createLine(
+            $cx, $y_top + $body_h, $cx, $y_low,
+            -fill => $color,
+            -tags => ['candle']
+        );
+    }
 }
 
 sub render_last_visible_price {
-    my ( $self, $canvas, $data, $scale ) = @_;
-    return unless @$data;
+    my ( $self, $canvas ) = @_;
+    return unless $self->{scale};
 
-    my $last_close = $data->[-1]{close};
-    my $y          = $scale->value_to_y($last_close);
-    my $x_start    = $scale->plot_width();
-    my $x_end      = $scale->{canvas_width};
+    my $scale = $self->{scale};
+    $canvas->delete('last_price');
+
+    my $last_close = $scale->{last_close};
+    return unless defined $last_close;
+    return unless $scale->value_in_range($last_close);
+
+    my $y     = $scale->value_to_y($last_close);
+    my $x_sep = $scale->_plot_w;
+    my $x_end = $scale->{canvas_w};
 
     $canvas->createLine(
-        0, $y, $x_start, $y,
-        -fill  => '#f0b90b',
+        0, $y, $x_sep, $y,
+        -fill  => COLOR_LAST_BG,
         -dash  => [ 3, 3 ],
         -width => 1,
-        -tags  => ['last_price'],
+        -tags  => ['last_price']
     );
 
     $canvas->createRectangle(
-        $x_start, $y - 9,
-        $x_end,   $y + 9,
-        -fill    => '#f0b90b',
-        -outline => '#f0b90b',
-        -tags    => ['last_price'],
+        $x_sep + 1, $y - 9, $x_end - 1, $y + 9,
+        -fill    => COLOR_LAST_BG,
+        -outline => COLOR_LAST_BG,
+        -tags    => ['last_price']
     );
 
     $canvas->createText(
-        $x_start + 4, $y,
-        -text   => sprintf( "%.2f", $last_close ),
-        -fill   => '#131722',
-        -font   => [ 'monospace', 8, 'bold' ],
-        -anchor => 'w',
-        -tags   => ['last_price'],
+        $x_sep + ( $x_end - $x_sep ) / 2, $y,
+        -text   => sprintf( '%.2f', $last_close ),
+        -fill   => '#ffffff',
+        -anchor => 'center',
+        -font   => 'TkFixedFont 8 bold',
+        -tags   => ['last_price']
     );
 }
 
-sub draw_crosshair {
-    my ( $self, $x, $y, $time_str ) = @_;
+sub show_vline_only {
+    my ( $self, $x ) = @_;
     my $c     = $self->{canvas};
     my $scale = $self->{scale};
-    my $ph    = $scale->plot_height();
+    return unless $c && $scale && defined $self->{_ch_vline};
 
-    my $y_in_range = ( $y >= 0 && $y <= $ph );
+    my $h     = $scale->{canvas_h};
+    my $x_sep = $scale->_plot_w;
 
-    if ($y_in_range) {
-        $c->coords( $self->{_ch_hline}, 0, $y, $scale->plot_width(), $y );
-        $c->itemconfigure( $self->{_ch_hline}, -state => 'normal' );
+    if ( $x < 0 || $x > $x_sep ) {
+        $c->itemconfigure( 'crosshair_price', -state => 'hidden' );
+        $c->itemconfigure( 'ohlcv_label',     -state => 'hidden' );
+        return;
     }
-    else {
-        $c->itemconfigure( $self->{_ch_hline}, -state => 'hidden' );
+
+    my $idx    = $scale->x_to_index($x);
+    my $snap_x = $scale->index_to_center_x($idx);
+
+    $c->coords( $self->{_ch_vline}, $snap_x, 0, $snap_x, $h );
+    $c->itemconfigure( $self->{_ch_vline},    -state => 'normal' );
+    $c->itemconfigure( $self->{_ch_hline},    -state => 'hidden' );
+    $c->itemconfigure( $self->{_ch_label_bg}, -state => 'hidden' );
+    $c->itemconfigure( $self->{_ch_label},    -state => 'hidden' );
+
+    $c->raise('crosshair_price');
+}
+
+sub show_ohlcv_info {
+    my ( $self, $candle_info ) = @_;
+    my $c = $self->{canvas};
+    return unless $c && defined $self->{_ohlcv_label} && $candle_info;
+
+    my $t = $candle_info->{time} // '';
+    $t =~ s/T/ /;
+    $t =~ s/:\d\d[-+]\d\d:\d\d$//;
+    $t =~ s/\..*$//;
+    my $txt = sprintf(
+        '%s   O %.2f  H %.2f  L %.2f  C %.2f  V %d',
+        $t,
+        $candle_info->{open}   // 0,
+        $candle_info->{high}   // 0,
+        $candle_info->{low}    // 0,
+        $candle_info->{close}  // 0,
+        $candle_info->{volume} // 0,
+    );
+    $c->itemconfigure(
+        $self->{_ohlcv_label},
+        -text  => $txt,
+        -state => 'normal'
+    );
+    $c->raise('ohlcv_label');
+}
+
+sub draw_time_label {
+    my ( $self, $snap_x, $candle_info ) = @_;
+    my $c     = $self->{canvas};
+    my $scale = $self->{scale};
+    return unless $c && $scale;
+    return unless $candle_info;
+
+    my $time = $candle_info->{time} // '';
+
+    my %months = (
+        '01' => 'Jan', '02' => 'Feb', '03' => 'Mar', '04' => 'Apr',
+        '05' => 'May', '06' => 'Jun', '07' => 'Jul', '08' => 'Aug',
+        '09' => 'Sep', '10' => 'Oct', '11' => 'Nov', '12' => 'Dec',
+    );
+    my @days = qw(Sun Mon Tue Wed Thu Fri Sat);
+
+    if ( $time =~ /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/ ) {
+        my ( $year, $month, $day, $hour, $min ) = ( $1, $2, $3, $4+0, $5+0 );
+
+        my $ts   = $candle_info->{ts} // 0;
+        my $wday = ( gmtime( $ts + 5*3600 ) )[6];
+
+        my $dow = $days[$wday];
+        my $mon = $months{$month} // $month;
+        my $yy  = substr( $year, 2, 2 );
+
+        $time = sprintf( '%s %d %s %s %d:%02d',
+            $dow, $day+0, $mon, $yy, $hour, $min );
     }
 
-    $c->coords( $self->{_ch_vline}, $x, 0, $x, $ph );
+    my $y     = $scale->{canvas_h} - 10;
+    my $pad_x = 6;
+    my $pad_y = 3;
+
+    $c->coords( $self->{_time_label}, $snap_x, $y );
+    $c->itemconfigure( $self->{_time_label}, -text => $time, -state => 'normal' );
+
+    my @bbox = $c->bbox( $self->{_time_label} );
+    return unless @bbox;
+
+    my ( $x1, $y1, $x2, $y2 ) = @bbox;
+    $c->coords( $self->{_time_label_bg},
+        $x1 - $pad_x, $y1 - $pad_y,
+        $x2 + $pad_x, $y2 + $pad_y );
+    $c->itemconfigure( $self->{_time_label_bg}, -state => 'normal' );
+    $c->raise('time_label');
+}
+
+sub hide_crosshair {
+    my ($self) = @_;
+    my $c = $self->{canvas};
+    return unless $c;
+    $c->itemconfigure( 'crosshair_price', -state => 'hidden' );
+    $c->itemconfigure( 'ohlcv_label',     -state => 'hidden' );
+    $c->itemconfigure( 'time_label',      -state => 'hidden' );
+}
+
+# -----------------------------------------------------------------------------
+# draw_crosshair
+# FIX: Etiqueta de precio ajustada y forzada matemáticamente a múltiplos
+# de 0.25 (Tick Size de mercado). La línea horizontal también se sincroniza.
+# -----------------------------------------------------------------------------
+sub draw_crosshair {
+    my ( $self, $x, $y, $candle_info ) = @_;
+    my $c     = $self->{canvas};
+    my $scale = $self->{scale};
+    return unless $c && $scale;
+    return unless defined $self->{_ch_vline};
+
+    my $h     = $scale->{canvas_h};
+    my $x_sep = $scale->_plot_w;
+    my $x_end = $scale->{canvas_w};
+
+    if ( $x > $x_sep ) {
+        $c->itemconfigure( 'crosshair_price', -state => 'hidden' );
+        return;
+    }
+
+    # Snap de la línea vertical a la vela
+    my $idx    = $scale->x_to_index($x);
+    my $snap_x = $scale->index_to_center_x($idx);
+
+    $c->coords( $self->{_ch_vline}, $snap_x, 0, $snap_x, $h );
     $c->itemconfigure( $self->{_ch_vline}, -state => 'normal' );
 
-    if ($y_in_range) {
-        my $price   = $scale->y_to_value($y);
-        my $x_start = $scale->plot_width();
+    # SNAP MATEMÁTICO: Redondeo del precio al múltiplo de 0.25 más cercano
+    my $raw_price     = $scale->y_to_value($y);
+    my $snapped_price = floor( $raw_price * 4 + 0.5 ) / 4;
+    
+    # Recalcular la coordenada Y exacta basándose en el precio redondeado
+    my $snap_y = $scale->value_to_y($snapped_price);
 
-        $c->coords( $self->{_ch_box},
-            $x_start, $y - 9, $scale->{canvas_width}, $y + 9 );
-        $c->itemconfigure( $self->{_ch_box}, -state => 'normal' );
+    # Línea horizontal forzada a moverse de a saltos ("ticks")
+    $c->coords( $self->{_ch_hline}, 0, $snap_y, $x_sep, $snap_y );
+    $c->itemconfigure( $self->{_ch_hline}, -state => 'normal' );
 
-        $c->coords( $self->{_ch_label}, $x_start + 4, $y );
-        $c->itemconfigure(
-            $self->{_ch_label},
-            -text  => sprintf( "%.2f", $price ),
-            -state => 'normal',
-        );
-    }
-    else {
-        $c->itemconfigure( $self->{_ch_box},   -state => 'hidden' );
-        $c->itemconfigure( $self->{_ch_label}, -state => 'hidden' );
-    }
+    # Dibujar la etiqueta y su fondo sobre la coordenada anclada
+    my $lbl_x = $x_sep + 1;
+    my $lbl_w = $x_end - $x_sep - 2;
+    $c->coords( $self->{_ch_label_bg}, $lbl_x, $snap_y - 9, $lbl_x + $lbl_w, $snap_y + 9 );
+    $c->itemconfigure( $self->{_ch_label_bg}, -state => 'normal' );
+    $c->coords( $self->{_ch_label}, $lbl_x + $lbl_w / 2, $snap_y );
+    $c->itemconfigure(
+        $self->{_ch_label},
+        -text  => sprintf( '%.2f', $snapped_price ),
+        -state => 'normal'
+    );
 
-    $time_str //= '';
-    my $label_w = 70;
-    my $y_time  = $ph + 1;
-
-    if ( $time_str ne '' ) {
-        $c->coords( $self->{_ch_time_box},
-            $x - $label_w / 2, $y_time,
-            $x + $label_w / 2, $y_time + 14 );
-        $c->itemconfigure( $self->{_ch_time_box}, -state => 'normal' );
-        $c->coords( $self->{_ch_time_label}, $x, $y_time + 1 );
-        $c->itemconfigure(
-            $self->{_ch_time_label},
-            -text  => $time_str,
-            -state => 'normal',
-        );
-    }
-    else {
-        $c->itemconfigure( $self->{_ch_time_box},   -state => 'hidden' );
-        $c->itemconfigure( $self->{_ch_time_label}, -state => 'hidden' );
+    if ($candle_info) {
+        $self->show_ohlcv_info($candle_info);
+        $self->draw_time_label( $snap_x, $candle_info );
     }
 
-    $c->raise('crosshair');
+    $c->raise('crosshair_price');
 }
 
 sub draw_time_axis {
     my ( $self, $canvas, $timestamps ) = @_;
+    return unless $timestamps;
     my $scale = $self->{scale};
-    my $y     = $scale->plot_height() + 2;
+    return unless $scale;
 
     $canvas->delete('time_axis');
 
-    for my $entry (@$timestamps) {
-        my ( $index, $label ) = @$entry;
-        my $x = $scale->index_to_center_x($index);
+    my $y_sep  = $scale->{canvas_h} - $scale->{padding_bot};
+    my $y_text = $y_sep + 4;
 
-        my $is_pivot = ( $label =~ m{^\d{2}/\d{2}$} );
+    $canvas->createLine(
+        0, $y_sep, $scale->_plot_w, $y_sep,
+        -fill => '#2a3445',
+        -tags => ['time_axis']
+    );
 
-        if ($is_pivot) {
-            $canvas->createLine(
-                $x, 0, $x, $scale->plot_height(),
-                -fill  => '#6b7280',
-                -dash  => '.',
-                -width => 3,
-                -tags  => ['time_axis'],
-            );
-            $canvas->createLine(
-                $x, $scale->plot_height(),
-                $x, $scale->plot_height() + 6,
-                -fill  => '#c8ccd8',
-                -width => 2,
-                -tags  => ['time_axis'],
-            );
-            $canvas->createText(
-                $x, $y + 7,
-                -text   => $label,
-                -fill   => '#ffffff',
-                -font   => [ 'monospace', 8, 'bold' ],
-                -anchor => 'n',
-                -tags   => ['time_axis'],
-            );
-        }
-        else {
-            $canvas->createLine(
-                $x, $scale->plot_height(),
-                $x, $scale->plot_height() + 4,
-                -fill  => '#555555',
-                -width => 1,
-                -tags  => ['time_axis'],
-            );
-            $canvas->createText(
-                $x, $y + 6,
-                -text   => $label,
-                -fill   => '#aaaaaa',
-                -font   => [ 'monospace', 9 ],
-                -anchor => 'n',
-                -tags   => ['time_axis'],
-            );
-        }
+    $canvas->createRectangle(
+        0, $y_sep, $scale->_plot_w, $scale->{canvas_h},
+        -fill    => BG_COLOR,
+        -outline => BG_COLOR,
+        -tags    => ['time_axis']
+    );
+
+    for my $anchor (@$timestamps) {
+        my $idx = $anchor->{index};
+        next if $idx < $scale->{offset};
+        next if $idx > $scale->{offset} + $scale->{visible_bars};
+
+        my $x = $scale->index_to_center_x($idx);
+        next if $x < 2 || $x > $scale->_plot_w - 2;
+
+        $canvas->createLine(
+            $x, $y_sep, $x, $y_sep + 4,
+            -fill => '#2a3445',
+            -tags => ['time_axis']
+        );
+
+        my $font = $anchor->{is_day} ? 'TkFixedFont 7 bold' : 'TkFixedFont 7';
+        $canvas->createText(
+            $x, $y_text + 4,
+            -text   => $anchor->{label},
+            -fill   => '#8b95a7',
+            -font   => $font,
+            -anchor => 'n',
+            -tags   => ['time_axis']
+        );
     }
 }
 
