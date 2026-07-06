@@ -1,28 +1,25 @@
 package Market::Overlays::SMC_Structures;
 
 # =============================================================================
-# Market::Overlays::SMC_Structures   (Tabla 1 del PDF)
+# Market::Overlays::SMC_Structures
 #
-# Capa visual de las estructuras SMC ya calculadas por
-# Indicators/SMC_Structures.pm: zonas FVG con desvanecimiento progresivo y
-# lineas BOS / CHoCH con etiquetas ubicadas en el tiempo. NO calcula nada.
+# Capa visual de BOS / iBOS ya calculados por Indicators/SMC_Structures.pm.
+# NO calcula nada. FVG fue removido de este modulo (ver Indicators::SMC_Structures).
 #
-# Estilo de etiquetas: igual que el indicador "SMC Structures and FVG" de
-# referencia (helper _chip):
-#   - solid   : texto blanco sobre chip de color   -> eventos (BOS / CHoCH).
-#   - outline : texto de color sobre chip blanco    -> etiqueta de la zona FVG.
+# Estilo de etiquetas: helper _chip:
+#   - solid : texto blanco sobre chip de color (unico estilo usado aqui).
 #   El chip se ancla a la coordenada X/precio reales (index_to_center_x /
 #   value_to_y), con anti-solape que DESPLAZA la etiqueta verticalmente (no la
 #   borra), redibujado cada frame -> estable en replay/zoom/desplazamiento.
 #
-#   BOS   : linea horizontal SOLIDA en el nivel roto, color direccional
-#           (verde alcista / rojo bajista), chip centrado sobre la linea.
-#   CHoCH : linea PUNTEADA violeta, chip centrado.
-#   FVG   : caja semitransparente que se desvanece con la edad (interpolacion
-#           de color hacia el fondo).
+#   BOS  (estructura principal) : linea horizontal SOLIDA y gruesa en el
+#                                  nivel roto, color direccional (verde
+#                                  alcista / rojo bajista).
+#   iBOS (subestructura)        : linea horizontal PUNTEADA fina, mismo
+#                                  color direccional pero mas tenue.
 #
 # Contrato de Overlay (OverlayManager): tag() + render($canvas, $scale).
-# Sub-toggles independientes: show_fvg / show_bos / show_choch.
+# Sub-toggles independientes: show_bos / show_ibos.
 # =============================================================================
 
 use strict;
@@ -34,30 +31,20 @@ sub tag        { return TAG; }
 sub tag_labels { return TAG_LABELS; }
 
 use constant {
-    C_UP    => '#26a69a',   # BOS alcista / FVG alcista (verde)
-    C_DOWN  => '#ef5350',   # BOS bajista / FVG bajista (rojo)
-    C_CHOCH => '#ab47bc',   # CHoCH (violeta)
-    C_HH    => '#26a69a',   # Higher High  (verde, continuacion alcista)
-    C_HL    => '#80cbc4',   # Higher Low   (verde claro)
-    C_LH    => '#ef9a9a',   # Lower High   (rojo claro)
-    C_LL    => '#ef5350',   # Lower Low    (rojo, continuacion bajista)
+    C_UP   => '#26a69a',   # alcista - verde
+    C_DOWN => '#ef5350',   # bajista - rojo
 };
 
 sub new {
     my ( $class, %args ) = @_;
     my $self = {
         source     => $args{source},
-        max_age    => $args{max_age} // 50,
-        show_fvg   => $args{show_fvg}   // 1,
         show_bos   => $args{show_bos}   // 1,
-        show_choch => $args{show_choch} // 1,
-        show_hhll  => $args{show_hhll}  // 1,
+        show_ibos  => $args{show_ibos}  // 1,
     };
     bless $self, $class;
     return $self;
 }
-
-sub tag { return TAG; }
 
 sub set_flag {
     my ( $self, $flag, $val ) = @_;
@@ -66,98 +53,29 @@ sub set_flag {
 
 # -----------------------------------------------------------------------------
 # render: se auto-limpia con su tag y dibuja solo lo visible.
-# El FVG va primero (al fondo); las lineas/chips de BOS/CHoCH encima.
 # -----------------------------------------------------------------------------
 sub render {
     my ( $self, $canvas, $scale ) = @_;
     $canvas->delete(TAG);
     my $src = $self->{source};
     return unless $src;
+    return unless $src->can('get_events');
 
     my @placed;   # cajas [x1,y1,x2,y2] de etiquetas ya colocadas (anti-solape)
-    $self->_render_fvgs( $canvas, $scale, $src, \@placed ) if $self->{show_fvg};
     $self->_render_events( $canvas, $scale, $src, \@placed )
-        if $self->{show_bos} || $self->{show_choch};
-    $self->_render_hhll( $canvas, $scale, $src, \@placed ) if $self->{show_hhll};
+        if $self->{show_bos} || $self->{show_ibos};
 }
 
 # -----------------------------------------------------------------------------
-# FVG: caja semitransparente tenue con desvanecimiento por edad (interpolacion
-# de color hacia el fondo blanco). La edad usa processed_last (replay-aware).
-# -----------------------------------------------------------------------------
-sub _render_fvgs {
-    my ( $self, $canvas, $scale, $src, $placed ) = @_;
-    my $fvgs = $src->get_fvgs or return;
-    my $last_known = $src->processed_last;
-    my $max_age    = $self->{max_age};
-
-    my $off    = $scale->{offset};
-    my $vb     = $scale->{visible_bars};
-    my $plot_w = $scale->_plot_w;
-
-    for my $f (@$fvgs) {
-        next if $f->{state} eq 'expired';
-
-        my $age = $last_known - $f->{created};
-        next if $age > $max_age;
-
-        my $right_idx = ( $f->{state} eq 'mitigated' && defined $f->{mitig_at} )
-            ? $f->{mitig_at}
-            : $f->{created} + $max_age;
-        $right_idx = $last_known if $right_idx > $last_known;
-
-        next if $right_idx      < $off;
-        next if $f->{idx_start} > $off + $vb;
-        next unless $scale->value_in_range( $f->{top} )
-                 || $scale->value_in_range( $f->{bottom} )
-                 || ( $f->{bottom} < $scale->{min_val}
-                   && $f->{top}    > $scale->{max_val} );
-
-        my $fresh = 1 - ( $age / $max_age );
-        $fresh = 0 if $fresh < 0;
-
-        my $base    = ( $f->{dir} eq 'bull' ) ? C_UP : C_DOWN;
-        my $fill_op = 0.18 + 0.17 * $fresh;          # 0.08 .. 0.20
-        $fill_op *= 0.55 if $f->{state} eq 'mitigated';
-        my $fill = _mix( $base, $fill_op );
-        my $line = _mix( $base, 0.30 + 0.30 * $fresh );
-
-        my $x1 = $scale->index_to_center_x( $f->{idx_start} );
-        my $x2 = $scale->index_to_center_x($right_idx);
-        $x1 = 0       if $x1 < 0;
-        $x2 = $plot_w if $x2 > $plot_w;
-        next if $x2 <= $x1;
-
-        my $yt = $scale->value_to_y( $f->{top} );
-        my $yb = $scale->value_to_y( $f->{bottom} );
-
-        $canvas->createRectangle(
-            $x1, $yt, $x2, $yb,
-            -fill    => $fill,
-            -outline => $line,
-            -width   => 0,
-            -tags    => [TAG],
-        );
-
-        # Etiqueta "FVG" (chip outline pequeno) centrada, solo en zonas con
-        # altura util y aun frescas, para no saturar.
-        if ( ( $yb - $yt ) >= 12 && $age <= int( $max_age * 0.5 ) ) {
-            my $tx = ( $x1 + $x2 ) / 2;
-            $tx = 24 if $tx < 24;
-            $self->_chip( $canvas, $tx, ( $yt + $yb ) / 2, 'FVG',
-                -color => $base, -style => 'outline', -place => 'center',
-                -font => 'TkDefaultFont 6 bold', -placed => $placed );
-        }
-    }
-}
-
-# -----------------------------------------------------------------------------
-# BOS / CHoCH: linea horizontal en el nivel roto, del pivote de origen a la
-# vela de ruptura, con chip SOLIDO centrado sobre la linea.
+# BOS / iBOS: linea horizontal en el nivel roto, del pivote de origen a la
+# vela de ruptura, con chip SOLIDO centrado.
+#   BOS  : solida, gruesa (width 2).
+#   iBOS : punteada, fina (width 1), mas tenue (mezclada con fondo).
 # -----------------------------------------------------------------------------
 sub _render_events {
     my ( $self, $canvas, $scale, $src, $placed ) = @_;
-    my $events = $src->get_events or return;
+    my $events = $src->get_events;
+    return unless $events && @$events;
 
     my $off    = $scale->{offset};
     my $vb     = $scale->{visible_bars};
@@ -166,13 +84,16 @@ sub _render_events {
     # De mas reciente a mas antiguo: si dos chips chocan, gana el mas nuevo.
     for ( my $k = $#$events ; $k >= 0 ; $k-- ) {
         my $e = $events->[$k];
-        my $is_choch = ( $e->{type} eq 'CHoCH' );
-        next if !$is_choch && !$self->{show_bos};
-        next if  $is_choch && !$self->{show_choch};
+        next unless defined $e;
+
+        my $is_internal = ( ( $e->{scope} // 'external' ) eq 'internal' );
+        next if  $is_internal && !$self->{show_ibos};
+        next if !$is_internal && !$self->{show_bos};
 
         my $bi = $e->{index};
+        next unless defined $bi;
         next if $bi < $off || $bi > $off + $vb;
-        next unless $scale->value_in_range( $e->{price} );
+        next unless defined $e->{price} && $scale->value_in_range( $e->{price} );
 
         my $oi = defined $e->{origin} ? $e->{origin} : $bi - 6;
         my $x1 = $scale->index_to_center_x($oi);
@@ -182,77 +103,35 @@ sub _render_events {
         next if $x2 <= $x1;
 
         my $y     = $scale->value_to_y( $e->{price} );
-        my $color = $is_choch ? C_CHOCH : ( $e->{dir} eq 'up' ? C_UP : C_DOWN );
+        my $dir   = $e->{dir} // 'up';
+        my $base  = ( $dir eq 'up' ) ? C_UP : C_DOWN;
+        my $color = $is_internal ? _mix_line($base) : $base;
+        my $width = $is_internal ? 1 : 2;
 
         $canvas->createLine( $x1, $y, $x2, $y,
-            -fill => $color, -width => 1,
-            ( $is_choch ? ( -dash => [ 5, 3 ] ) : () ),
+            -fill => $color, -width => $width,
+            ( $is_internal ? ( -dash => [ 5, 3 ] ) : () ),
             -tags => [TAG] );
 
-        my $up = ( ( $e->{dir} || 'up' ) eq 'up' );
-        $self->_chip( $canvas, ( $x1 + $x2 ) / 2, $y, $e->{label},
+        my $up = ( $dir eq 'up' );
+        my $label = $e->{label} // ( $is_internal ? 'iBOS' : 'BOS' );
+        $self->_chip( $canvas, ( $x1 + $x2 ) / 2, $y, $label,
             -color => $color, -style => 'solid',
             -place => ( $up ? 'above' : 'below' ), -placed => $placed );
     }
 }
 
 # -----------------------------------------------------------------------------
-# _render_hhll: etiquetas HH/HL/LH/LL sobre los swing points confirmados.
-# Estilo Mxwll: chip outline pequeno encima del swing high o debajo del
-# swing low, con color direccional. Lee los swings desde el indicador de
-# liquidez (via el source) y las etiquetas precalculadas por el indicador
-# SMC (get_swing_labels). Solo dibuja los swings visibles en la ventana.
+# _mix_line: version tenue de un color base, para iBOS (subestructura menos
+# relevante que la estructura principal, no debe competir visualmente).
 # -----------------------------------------------------------------------------
-sub _render_hhll {
-    my ( $self, $canvas, $scale, $src, $placed ) = @_;
-
-    my $liq = $src->{liquidity};
-    return unless $liq;
-
-    my $swings = $liq->get_swings;
-    return unless $swings && @$swings;
-
-    my $labels = $src->get_swing_labels;
-    return unless $labels && %$labels;
-
-    my $off    = $scale->{offset};
-    my $vb     = $scale->{visible_bars};
-
-    for my $sw (@$swings) {
-        my $idx = $sw->{index};
-        next if $idx < $off || $idx > $off + $vb;
-
-        my $label = $labels->{$idx};
-        next unless defined $label;
-
-        next unless $scale->value_in_range( $sw->{price} );
-
-        my $x  = $scale->index_to_center_x($idx);
-        my $y  = $scale->value_to_y( $sw->{price} );
-        my $up = ( $sw->{kind} eq 'H' );
-
-        my $color =
-            $label eq 'HH' ? C_HH :
-            $label eq 'HL' ? C_HL :
-            $label eq 'LH' ? C_LH :
-                             C_LL;
-
-        # Chip outline pequeno, anclado encima del high o debajo del low
-        $self->_chip( $canvas, $x, $y, $label,
-            -color  => $color,
-            -style  => 'outline',
-            -place  => ( $up ? 'above' : 'below' ),
-            -offset => 10,
-            -font   => 'TkDefaultFont 7 bold',
-            -placed => $placed,
-        );
-    }
+sub _mix_line {
+    my ($hex) = @_;
+    return _mix( $hex, 0.55 );
 }
 
 # -----------------------------------------------------------------------------
-# _chip: etiqueta tipo TradingView (replica del proyecto de referencia).
-#   -style 'solid'  : texto blanco sobre chip de color (eventos).
-#   -style 'outline': texto de color sobre chip blanco con borde de color.
+# _chip: etiqueta tipo TradingView.
 #   -place 'above'|'below'|'center' respecto a (cx,cy); -offset separacion.
 #   Anti-solape: si choca con una etiqueta ya puesta, la DESPLAZA (no la borra).
 #   $placed acumula las cajas [x1,y1,x2,y2] del frame actual.
@@ -260,11 +139,9 @@ sub _render_hhll {
 sub _chip {
     my ( $self, $canvas, $cx, $cy, $text, %o ) = @_;
     my $color  = $o{-color} // '#d6dbe6';
-    my $style  = $o{-style} // 'solid';
     my $place  = $o{-place} // 'above';
     my $off    = defined $o{-offset} ? $o{-offset} : 9;
-    my $font   = $o{-font}
-              // ( $style eq 'solid' ? 'TkDefaultFont 12 bold' : 'TkDefaultFont 7 bold' );
+    my $font   = $o{-font} // 'TkDefaultFont 10 bold';
     my $placed = $o{-placed};
     my $pad    = 2;
 
@@ -274,7 +151,7 @@ sub _chip {
 
     my $tid = $canvas->createText(
         $cx, $ty, -text => $text, -anchor => 'center', -font => $font,
-        -fill => ( $style eq 'solid' ? '#ffffff' : $color ), -tags => [TAG, TAG_LABELS] );
+        -fill => '#ffffff', -tags => [TAG, TAG_LABELS] );
     my @bb = $canvas->bbox($tid);
     return unless @bb;
     my ( $x1, $y1, $x2, $y2 ) = @bb;
@@ -292,16 +169,10 @@ sub _chip {
         push @$placed, [ $x1, $y1, $x2, $y2 ];
     }
 
-    my $fill = $style eq 'solid' ? $color : $color; # Usa el color real o el mezclado con _mix
-
-    my $rid  = $canvas->createRectangle(
+    my $rid = $canvas->createRectangle(
         $x1, $y1, $x2, $y2,
-        -fill    => $fill, 
-        -outline => $color, 
-        -width   => 1, 
-        -stipple => 'gray25', # <--- ESTO simula una opacidad del 25% punteada nativa de Tk
-        -tags    => [TAG, TAG_LABELS] 
-    );
+        -fill => $color, -outline => $color, -width => 1,
+        -stipple => 'gray50', -tags => [TAG, TAG_LABELS] );
     $canvas->lower( $rid, $tid );
     return [ $x1, $y1, $x2, $y2 ];
 }

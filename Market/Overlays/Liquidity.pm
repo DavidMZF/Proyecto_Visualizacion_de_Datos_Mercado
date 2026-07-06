@@ -1,29 +1,23 @@
 package Market::Overlays::Liquidity;
 
 # =============================================================================
-# Market::Overlays::Liquidity   (Tabla 1 del PDF)
+# Market::Overlays::Liquidity
 #
 # Capa visual del modulo de liquidez. Lee lo ya calculado por
-# Indicators/Liquidity.pm (swings, niveles BSL/SSL, EQH/EQL y eventos
-# Sweep/Grab/Run) y lo dibuja segun la Tabla 2 del PDF. NO calcula nada.
+# Indicators/Liquidity.pm (swings consolidados, etiquetas HH/HL/LH/LL,
+# trend line, niveles BSL/SSL, EQH/EQL y eventos Sweep/Grab/Run) y lo dibuja.
+# NO calcula nada.
 #
-# Estilo de etiquetas: igual que el proyecto de referencia (helper _chip):
+# Estilo de etiquetas: helper _chip:
 #   - outline : texto de color sobre chip blanco con borde de color ->
-#               niveles resting BSL/SSL y EQH/EQL (sobrios, junto al evento).
+#               niveles resting BSL/SSL, EQH/EQL y etiquetas HH/HL/LH/LL.
 #   - solid   : texto blanco sobre chip de color -> eventos resueltos
 #               Sweep / Grab / Run (destacados).
-#   Anti-solape que DESPLAZA la etiqueta verticalmente (no la borra). Las
-#   etiquetas se anclan a la coordenada X/precio reales -> estables en
-#   replay/zoom/desplazamiento.
-#
-#   BSL/SSL : linea horizontal punteada (rojo/verde) que se extiende a la
-#             derecha; chip "BSL"/"SSL" junto a la regleta.
-#   EQH/EQL : linea que conecta los dos pivotes iguales + chip.
-#   Sweep/Grab/Run : marcador en la vela de resolucion + chip de color.
+#   Anti-solape que DESPLAZA la etiqueta verticalmente (no la borra).
 #
 # Contrato de Overlay (OverlayManager): tag() + render($canvas, $scale).
-# Sub-toggles: show_swing/show_bsl/show_ssl/show_eqh/show_eql/show_sweeps/
-#   show_grabs/show_runs.
+# Sub-toggles: show_swing / show_hhll / show_trendline / show_bsl / show_ssl /
+#   show_eqh / show_eql / show_sweeps / show_grabs / show_runs.
 # =============================================================================
 
 use strict;
@@ -41,6 +35,11 @@ use constant {
     C_EQ     => '#7e57c2',   # violeta (EQH/EQL, configurable)
     C_GRAB   => '#ff9800',   # naranja (Liquidity Grab)
     C_RUN    => '#4f8cff',   # azul    (Liquidity Run)
+    C_TREND  => '#d6dbe6',   # gris claro (trend line)
+    C_HH     => '#26a69a',   # Higher High  (verde, continuacion alcista)
+    C_HL     => '#80cbc4',   # Higher Low   (verde claro)
+    C_LH     => '#ef9a9a',   # Lower High   (rojo claro)
+    C_LL     => '#ef5350',   # Lower Low    (rojo, continuacion bajista)
     MAX_LINES  => 6,         # niveles BSL/SSL resting dibujados (mas recientes)
     MAX_EVENTS => 50,        # eventos recientes considerados por render
 };
@@ -48,15 +47,17 @@ use constant {
 sub new {
     my ( $class, %args ) = @_;
     my $self = {
-        source      => $args{source},
-        show_swing  => $args{show_swing}  // 1,
-        show_bsl    => $args{show_bsl}    // 1,
-        show_ssl    => $args{show_ssl}    // 1,
-        show_eqh    => $args{show_eqh}    // 1,
-        show_eql    => $args{show_eql}    // 1,
-        show_sweeps => $args{show_sweeps} // 1,
-        show_grabs  => $args{show_grabs}  // 1,
-        show_runs   => $args{show_runs}   // 1,
+        source        => $args{source},
+        show_swing    => $args{show_swing}    // 1,
+        show_hhll     => $args{show_hhll}     // 1,
+        show_trendline=> $args{show_trendline}// 1,
+        show_bsl      => $args{show_bsl}      // 1,
+        show_ssl      => $args{show_ssl}      // 1,
+        show_eqh      => $args{show_eqh}      // 1,
+        show_eql      => $args{show_eql}      // 1,
+        show_sweeps   => $args{show_sweeps}   // 1,
+        show_grabs    => $args{show_grabs}    // 1,
+        show_runs     => $args{show_runs}     // 1,
     };
     bless $self, $class;
     return $self;
@@ -76,11 +77,42 @@ sub render {
     return unless $src;
 
     my @placed;   # cajas [x1,y1,x2,y2] de etiquetas ya colocadas (anti-solape)
-    $self->_render_swings( $canvas, $scale, $src )            if $self->{show_swing};
+    $self->_render_trendline( $canvas, $scale, $src )          if $self->{show_trendline};
+    $self->_render_swings( $canvas, $scale, $src )             if $self->{show_swing};
+    $self->_render_hhll( $canvas, $scale, $src, \@placed )     if $self->{show_hhll};
     $self->_render_levels( $canvas, $scale, $src, \@placed );
     $self->_render_equals( $canvas, $scale, $src, \@placed )
         if $self->{show_eqh} || $self->{show_eql};
     $self->_render_events( $canvas, $scale, $src, \@placed );
+}
+
+# -----------------------------------------------------------------------------
+# Trend line: polilinea construida con TODOS los swings consolidados (highs
+# y lows intercalados, sin distincion de tipo), en orden cronologico.
+# -----------------------------------------------------------------------------
+sub _render_trendline {
+    my ( $self, $canvas, $scale, $src ) = @_;
+    return unless $src->can('get_trendline');
+    my $pts = $src->get_trendline or return;
+    return if @$pts < 2;
+
+    my $off = $scale->{offset};
+    my $vb  = $scale->{visible_bars};
+    my $x_lo = $off - 5;
+    my $x_hi = $off + $vb + 5;
+
+    my @sorted = sort { $a->{index} <=> $b->{index} } @$pts;
+
+    my @coords;
+    for my $p (@sorted) {
+        next if $p->{index} < $x_lo || $p->{index} > $x_hi;
+        next unless $scale->value_in_range( $p->{price} );
+        push @coords, $scale->index_to_center_x( $p->{index} ), $scale->value_to_y( $p->{price} );
+    }
+    return if @coords < 4;
+
+    $canvas->createLine( @coords,
+        -fill => C_TREND, -width => 1, -smooth => 0, -tags => [TAG] );
 }
 
 # -----------------------------------------------------------------------------
@@ -153,6 +185,51 @@ sub _render_swings {
             -fill => $color, -width => 1, -tags => [TAG] );
         $canvas->createLine( $x + 3, $y + $dy, $x, $y,
             -fill => $color, -width => 1, -tags => [TAG] );
+    }
+}
+
+# -----------------------------------------------------------------------------
+# HH / HL / LH / LL: etiquetas de estructura de mercado sobre los swings
+# consolidados. Chip outline pequeno, encima del high o debajo del low,
+# color direccional. Toggle independiente show_hhll.
+# -----------------------------------------------------------------------------
+sub _render_hhll {
+    my ( $self, $canvas, $scale, $src, $placed ) = @_;
+    my $swings = $src->get_swings or return;
+    return unless @$swings;
+
+    my $labels = $src->can('get_swing_labels') ? $src->get_swing_labels : undef;
+    return unless $labels && %$labels;
+
+    my $off = $scale->{offset};
+    my $vb  = $scale->{visible_bars};
+
+    for my $sw (@$swings) {
+        my $idx = $sw->{index};
+        next if $idx < $off || $idx > $off + $vb;
+
+        my $label = $labels->{$idx};
+        next unless defined $label;
+        next unless $scale->value_in_range( $sw->{price} );
+
+        my $x  = $scale->index_to_center_x($idx);
+        my $y  = $scale->value_to_y( $sw->{price} );
+        my $up = ( $sw->{kind} eq 'H' );
+
+        my $color =
+            $label eq 'HH' ? C_HH :
+            $label eq 'HL' ? C_HL :
+            $label eq 'LH' ? C_LH :
+                             C_LL;
+
+        $self->_chip( $canvas, $x, $y, $label,
+            -color  => $color,
+            -style  => 'outline',
+            -place  => ( $up ? 'above' : 'below' ),
+            -offset => 10,
+            -font   => 'TkDefaultFont 7 bold',
+            -placed => $placed,
+        );
     }
 }
 
@@ -235,7 +312,7 @@ sub _render_events {
 }
 
 # -----------------------------------------------------------------------------
-# _chip: etiqueta tipo TradingView (replica del proyecto de referencia).
+# _chip: etiqueta tipo TradingView.
 #   -style 'solid'  : texto blanco sobre chip de color (eventos).
 #   -style 'outline': texto de color sobre chip blanco con borde de color.
 #   -place 'above'|'below'|'center' respecto a (cx,cy); -offset separacion.

@@ -929,7 +929,7 @@ sub bind_events {
 sub _horizontal_zoom {
     my ( $self, $dir, $use_anchor ) = @_;
     my $old = $self->{visible_bars};
-    
+
     my $new;
     if ( $dir > 0 ) {
         $new = int( $old * 1.15 );
@@ -939,8 +939,19 @@ sub _horizontal_zoom {
         $new-- if $new == $old; # Fuerza el salto si el redondeo lo estanca
     }
 
+    # Tope superior DINAMICO: MAX_BARS es un piso razonable para datasets
+    # chicos, pero si hay mas velas cargadas que MAX_BARS (comun en 1m/5m,
+    # donde el historico facilmente supera las 800 velas), el zoom-out
+    # maximo debe poder llegar a mostrar TODO el dataset, no cortarse en
+    # un tope fijo que deja datos fuera de vista.
+    my $max_bars = MAX_BARS;
+    if ( $self->{market} && $self->{market}->can('size') ) {
+        my $total = $self->{market}->size;
+        $max_bars = $total if $total > $max_bars;
+    }
+
     $new = MIN_BARS if $new < MIN_BARS;
-    $new = MAX_BARS if $new > MAX_BARS;
+    $new = $max_bars if $new > $max_bars;
     return if $new == $old;
 
     if ( $use_anchor && defined $self->{_zoom_anchor_idx} && $self->{_scale_price} ) {

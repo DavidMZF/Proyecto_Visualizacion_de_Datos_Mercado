@@ -26,6 +26,10 @@ use Market::Indicators::Liquidity;
 use Market::Indicators::SMC_Structures;
 use Market::Overlays::SMC_Structures;
 use Market::Overlays::Liquidity;
+use Market::Indicators::ZigZagMTF;
+use Market::Indicators::ZigZagVolumeProfile;
+use Market::Overlays::ZigZagMTF;
+use Market::Overlays::ZigZagVolumeProfile;
 
 # =============================================================================
 # VENTANA
@@ -135,21 +139,47 @@ my $ind_manager = Market::IndicatorManager->new;
 # indicadores en este orden. Liquidity necesita el ATR ya calculado (tolerancia
 # EQH/EQL) y SMC_Structures necesita los swings ya confirmados por Liquidity.
 my $atr_ind = Market::Indicators::ATR->new(14);
-my $liq_ind = Market::Indicators::Liquidity->new( atr => $atr_ind, k => 3 );
+my $liq_ind = Market::Indicators::Liquidity->new(
+    atr        => $atr_ind,
+    fractal_n  => 3,     # N velas a cada lado para fractalidad base
+    m_atr      => 1.5,   # multiplicador ATR (filtro 1: volatilidad)
+    atr_period => 14,
+    v_desp     => 10,    # ventana max. de velas para validar desplazamiento
+    u_desp     => 2.0,   # multiplicador ATR de recorrido minimo (filtro 2)
+);
 my $smc_ind = Market::Indicators::SMC_Structures->new(
-    liquidity => $liq_ind, max_age => 50 );
+    liquidity => $liq_ind, break_mode => 'close' );
+
+# ZigZag Multi Time Frame (direccion INTERNA): remuestrea a 30min por
+# defecto y corre un zigzag clasico por periodo, independiente de ATR.
+my $zzmtf_ind = Market::Indicators::ZigZagMTF->new(
+    resolution_minutes => 30,   # 15 | 30 | 60
+    period             => 2,    # ZigZag Period (estilo ZZMTF)
+);
+
+# ZigZag Volume Profile (direccion EXTERNA): zigzag de mayor grado sobre la
+# temporalidad base, con volume profile + POC por pierna.
+my $zzvp_ind = Market::Indicators::ZigZagVolumeProfile->new(
+    period       => 8,    # mayor que zzmtf: captura estructura de mayor grado
+    bins         => 10,
+    max_profiles => 15,
+);
 
 $ind_manager->register('atr',       $atr_ind);
 $ind_manager->register('liquidity', $liq_ind);
 $ind_manager->register('smc',       $smc_ind);
+$ind_manager->register('zzmtf',     $zzmtf_ind);
+$ind_manager->register('zzvp',      $zzvp_ind);
 
-print "Calculando indicadores (ATR, Liquidity, SMC)...\n";
+print "Calculando indicadores (ATR, Liquidity, SMC, ZigZag MTF/VP)...\n";
 $ind_manager->rebuild_all($market);
-printf "ATR: %d  |  swings: %d  |  eventos liq: %d  |  FVGs: %d\n",
+printf "ATR: %d  |  swings: %d  |  eventos liq: %d  |  eventos BOS/iBOS: %d  |  pivotes ZZMTF: %d  |  piernas ZZVP: %d\n",
     scalar @{ $ind_manager->get('atr') },
     scalar @{ $liq_ind->get_swings },
     scalar @{ $liq_ind->get_events },
-    scalar @{ $smc_ind->get_fvgs };
+    scalar @{ $smc_ind->get_events },
+    scalar @{ $zzmtf_ind->get_pivots },
+    scalar @{ $zzvp_ind->get_profiles };
 
 # =============================================================================
 # OVERLAYS — gestor + overlays reales SMC y Liquidez (Tabla 1, Fase 2)
@@ -158,11 +188,14 @@ printf "ATR: %d  |  swings: %d  |  eventos liq: %d  |  FVGs: %d\n",
 # activar de forma independiente desde el menu de herramientas.
 # =============================================================================
 my $overlay_mgr = Market::OverlayManager->new;
-my $smc_overlay = Market::Overlays::SMC_Structures->new(
-    source => $smc_ind, max_age => 50 );
-my $liq_overlay = Market::Overlays::Liquidity->new( source => $liq_ind );
+my $smc_overlay   = Market::Overlays::SMC_Structures->new( source => $smc_ind );
+my $liq_overlay   = Market::Overlays::Liquidity->new( source => $liq_ind );
+my $zzmtf_overlay = Market::Overlays::ZigZagMTF->new( source => $zzmtf_ind );
+my $zzvp_overlay  = Market::Overlays::ZigZagVolumeProfile->new( source => $zzvp_ind );
 $overlay_mgr->register('smc',       $smc_overlay, visible => 0);
 $overlay_mgr->register('liquidity', $liq_overlay, visible => 0);
+$overlay_mgr->register('zzmtf',     $zzmtf_overlay, visible => 0);
+$overlay_mgr->register('zzvp',      $zzvp_overlay, visible => 0);
 
 # =============================================================================
 # PANELES Y MOTOR
@@ -536,19 +569,18 @@ my $make_chk = sub {
 };
 
 # =============================================================================
-# Columna SMC STRUCTURES (BOS / CHoCH / FVG)
+# Columna SMC STRUCTURES (BOS / iBOS)
 # =============================================================================
-my %SMC = ( show_fvg => 0, show_bos => 0, show_choch => 0 );
+my %SMC = ( show_bos => 0, show_ibos => 0 );
 my $smc_master = 0;
 my $refresh_smc = sub {
     $smc_overlay->set_flag($_, $SMC{$_}) for keys %SMC;
-    my $any = ( $SMC{show_fvg} || $SMC{show_bos} || $SMC{show_choch} ) ? 1 : 0;
+    my $any = ( $SMC{show_bos} || $SMC{show_ibos} ) ? 1 : 0;
     $overlay_mgr->set_visible('smc', $any);
     $engine->request_render;
 };
 my $sync_smc_master = sub {
-    $smc_master =
-        ( $SMC{show_fvg} && $SMC{show_bos} && $SMC{show_choch} ) ? 1 : 0;
+    $smc_master = ( $SMC{show_bos} && $SMC{show_ibos} ) ? 1 : 0;
 };
 my $leaf_smc = sub { $refresh_smc->(); $sync_smc_master->(); };
 
@@ -557,9 +589,53 @@ $make_chk->($col_smc, 'Activar SMC', \$smc_master, sub {
     $SMC{$_} = $smc_master for keys %SMC;   # master = encender/apagar TODO SMC
     $refresh_smc->();
 });
-$make_chk->($col_smc, 'BOS',       \$SMC{show_bos},   $leaf_smc);
-$make_chk->($col_smc, 'CHoCH',     \$SMC{show_choch}, $leaf_smc);
-$make_chk->($col_smc, 'FVG',       \$SMC{show_fvg},   $leaf_smc);
+$make_chk->($col_smc, 'BOS',  \$SMC{show_bos},  $leaf_smc);
+$make_chk->($col_smc, 'iBOS', \$SMC{show_ibos}, $leaf_smc);
+
+$tools_bar->Frame(-background => '#2a3445', -width => 1, -height => 16)
+    ->pack(-side => 'left', -pady => 4, -padx => 4);
+
+# =============================================================================
+# Columna ZIGZAG MTF (direccion INTERNA) — remuestreo OHLC + zigzag por periodo
+# =============================================================================
+my %ZZMTF = ( show => 0 );
+my $refresh_zzmtf = sub {
+    $zzmtf_overlay->set_flag('show', $ZZMTF{show});
+    $overlay_mgr->set_visible('zzmtf', $ZZMTF{show});
+    $engine->request_render;
+};
+
+my $col_zzmtf = $make_col->('ZigZag MTF (Interna)', '#26a69a');
+$make_chk->($col_zzmtf, 'Mostrar ZigZag Interno', \$ZZMTF{show}, $refresh_zzmtf);
+
+$tools_bar->Frame(-background => '#2a3445', -width => 1, -height => 16)
+    ->pack(-side => 'left', -pady => 4, -padx => 4);
+
+# =============================================================================
+# Columna ZIGZAG VOLUME PROFILE (direccion EXTERNA) — zigzag mayor grado + POC
+# =============================================================================
+my %ZZVP = ( show_zigzag => 0, show_volume_profile => 0, show_poc => 0 );
+my $zzvp_master = 0;
+my $refresh_zzvp = sub {
+    $zzvp_overlay->set_flag($_, $ZZVP{$_}) for keys %ZZVP;
+    my $any = ( $ZZVP{show_zigzag} || $ZZVP{show_volume_profile} || $ZZVP{show_poc} ) ? 1 : 0;
+    $overlay_mgr->set_visible('zzvp', $any);
+    $engine->request_render;
+};
+my $sync_zzvp_master = sub {
+    $zzvp_master =
+        ( $ZZVP{show_zigzag} && $ZZVP{show_volume_profile} && $ZZVP{show_poc} ) ? 1 : 0;
+};
+my $leaf_zzvp = sub { $refresh_zzvp->(); $sync_zzvp_master->(); };
+
+my $col_zzvp = $make_col->('ZigZag Volume Profile (Externa)', '#7e57c2');
+$make_chk->($col_zzvp, 'Activar ZZVP', \$zzvp_master, sub {
+    $ZZVP{$_} = $zzvp_master for keys %ZZVP;
+    $refresh_zzvp->();
+});
+$make_chk->($col_zzvp, 'ZigZag Externo', \$ZZVP{show_zigzag},         $leaf_zzvp);
+$make_chk->($col_zzvp, 'Volume Profile', \$ZZVP{show_volume_profile}, $leaf_zzvp);
+$make_chk->($col_zzvp, 'POC',            \$ZZVP{show_poc},            $leaf_zzvp);
 
 $tools_bar->Frame(-background => '#2a3445', -width => 1, -height => 16)
     ->pack(-side => 'left', -pady => 4, -padx => 4);
@@ -568,7 +644,8 @@ $tools_bar->Frame(-background => '#2a3445', -width => 1, -height => 16)
 # Columna LIQUIDITY (Swing / BSL / SSL / EQH / EQL / Sweeps / Grabs / Runs)
 # =============================================================================
 my %LIQ = (
-    show_swing => 0, show_bsl => 0, show_ssl => 0, show_eqh => 0,
+    show_swing => 0, show_hhll => 0, show_trendline => 0,
+    show_bsl => 0, show_ssl => 0, show_eqh => 0,
     show_eql => 0, show_sweeps => 0, show_grabs => 0, show_runs => 0,
 );
 my $liq_master = 0;
@@ -590,6 +667,8 @@ $make_chk->($col_liq, 'Activar Liquidity', \$liq_master, sub {
     $refresh_liq->();
 });
 $make_chk->($col_liq, 'Swing Points',  \$LIQ{show_swing},  $leaf_liq);
+$make_chk->($col_liq, 'HH/HL/LH/LL',   \$LIQ{show_hhll},   $leaf_liq);
+$make_chk->($col_liq, 'Trend Line',    \$LIQ{show_trendline}, $leaf_liq);
 $make_chk->($col_liq, 'BSL - Buy Side',  \$LIQ{show_bsl},  $leaf_liq);
 $make_chk->($col_liq, 'SSL - Sell Side', \$LIQ{show_ssl},  $leaf_liq);
 $make_chk->($col_liq, 'EQH',     \$LIQ{show_eqh},    $leaf_liq);

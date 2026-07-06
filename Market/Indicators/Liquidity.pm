@@ -1,77 +1,64 @@
 package Market::Indicators::Liquidity;
 
 # =============================================================================
-# Market::Indicators::Liquidity   (Tabla 1 del PDF)
+# Market::Indicators::Liquidity
 #
-# Calculo de Swing Points (High/Low), niveles de liquidez BSL/SSL, pares
-# EQH/EQL y la maquina de estados Sweep/Grab/Run. NO dibuja nada (eso es
-# Overlays/Liquidity.pm). Contrato IndicatorManager (igual que ATR.pm):
-#   - update_at_index($market_data, $i)
-#   - update_last($market_data)
-#   - get_values()
-#   - reset()
+# Deteccion y filtrado de Puntos de Giro (Swings) y clasificacion de
+# Estructura de Mercado (HH / HL / LH / LL), mas la Linea de Tendencia
+# construida a partir de la secuencia combinada de swings (highs y lows
+# intercalados, sin distincion de tipo para trazar la polilinea).
 #
-# Contrato adicional consumido por Overlays/Liquidity.pm e
-# Indicators/SMC_Structures.pm:
-#   get_swings()       -> [ {id,index,ts,price,kind:'H'|'L'}, ... ]
-#   get_levels()       -> [ {id,side:'buy'|'sell',price,index,state,
-#                             classification,swept_at_index,
-#                             resolved_at_index,origin_tf,
-#                             volumes:{'1m'=>N,'5m'=>N,'15m'=>N}}, ... ]
-#   get_equals()       -> [ {kind:'EQH'|'EQL',i1,i2,p1,p2}, ... ]
-#   get_events()       -> [ {type:'SWEEP'|'GRAB'|'RUN',dir:'up'|'down',
-#                             index,price,label}, ... ]
-#   last_swing_high()  -> {index,price,...} | undef
-#   last_swing_low()   -> {index,price,...} | undef
-#   side_label($side)  -> 'BSL' | 'SSL'
-#   is_internal($level,$current_tf) -> 1|0  (ver nota de alcance Etapa 6)
+# No incluye Order Blocks, FVG ni logica de dibujo: esto es SOLO calculo.
+# El overlay (Overlays/Liquidity.pm) lee get_swings / get_swing_labels /
+# get_trendline y dibuja.
 #
-# ETAPA 6 (peso de volumen multi-temporal + Interna/Externa):
-#   Cada nivel almacena, ademas, el volumen 1m/5m/15m observado durante la
-#   ventana [ts,ts+interval) de su vela de origen, en la TF que estaba
-#   activa al crearse (origin_tf). NOTA DE ALCANCE: con la arquitectura
-#   actual (una sola instancia de Liquidity viva por TF -- cualquier cambio
-#   de TF dispara reset_all+rebuild_all desde cero) NUNCA puede existir un
-#   nivel "Externo" en sentido estricto: is_internal() siempre devolvera 1
-#   en esta entrega. La coexistencia real multi-TF (necesaria para que
-#   "Externa" tenga un caso real) se reserva para la 2a entrega.
+# -----------------------------------------------------------------------------
+# PIPELINE (por cada swing base candidato):
 #
-# GARANTIA DE NO-FUGA DE FUTURO:
-#   - Swings: un swing en el indice c con profundidad k SOLO es
-#     matematicamente confirmable cuando existen las k velas posteriores
-#     (c+1..c+k). Este indicador evalua, al recibir la vela visible con
-#     indice i, el CANDIDATO c = i - k (nunca la vela i misma). El swing
-#     se registra exactamente en el instante en que i = c+k se vuelve
-#     visible -- nunca antes. No hay verificacion adicional de replay:
-#     la seguridad es consecuencia directa de la definicion del swing.
-#   - Maquina de estados (Sweep/Swept/Reclaimed/Acceptance/Resolved):
-#     evalua SOLO con la vela actualmente visible y el historial de
-#     velas ya procesadas (swept_at_index, contador de velas desde el
-#     sweep) -- nunca necesita mirar hacia adelante, por lo que no
-#     requiere ningun retraso adicional.
+#   1. FRACTALIDAD (deteccion base)
+#        Maximo swing base en t: High[t] > High[t-i] y High[t] > High[t+i]
+#        Minimo swing base en t: Low[t]  < Low[t-i]  y Low[t]  < Low[t+i]
+#        para todo i en [1, N] (N = fractal_n).
+#        La vela t solo puede confirmarse cuando ya se conocen N velas
+#        posteriores (t+N) -> confirmacion retrasada, cero look-ahead real
+#        en el sentido de que el swing no se usa/expone hasta ese momento.
 #
-# EQH/EQL: dos swings del MISMO tipo (H/H o L/L) se consideran "iguales"
-# si |precio_1 - precio_2| <= ATR(en el indice del swing mas reciente)
-# * eq_factor (0.10 por defecto).
+#   2. FILTRO 1: VOLATILIDAD ATR (ruido de mercados laterales)
+#        Un swing base solo se CONSOLIDA si la distancia vertical entre el
+#        nuevo swing y el ULTIMO SWING CONSOLIDADO DEL TIPO OPUESTO es
+#        estrictamente mayor que (m_ATR * ATR[t]).
+#        Si no la cumple, se descarta como ruido (no pasa a la fase 2).
 #
-# Maquina de estados (orden de evaluacion en cada vela, sobre niveles
-# abiertos):
-#   DETECTED  -> SWEPT      : High > nivel (BSL) o Low < nivel (SSL).
-#   SWEPT     -> RESOLVED   : evaluado vela por vela desde el sweep
-#       (n_since = velas transcurridas DESDE Y CON la vela del sweep):
-#         a) cierre vuelve dentro del rango Y n_since <= grab_window
-#            -> clasificacion GRAB.
-#         b) cierre vuelve dentro del rango Y n_since >  grab_window
-#            -> clasificacion SWEEP.
-#         c) cierre se mantiene fuera del rango por n_since >=
-#            acceptance_n (sin haber vuelto dentro antes)
-#            -> clasificacion RUN.
-#   IMPORTANTE: acceptance_n DEBE ser > grab_window, o la clasificacion
-#   SWEEP (reclamo "estandar", no tan rapido como un Grab) jamas podria
-#   ocurrir -- todo se resolveria como GRAB o RUN antes de tener
-#   oportunidad de caer en la rama intermedia. Default: grab_window=3
-#   (valor explicito del PDF), acceptance_n=10 (parametrizable, sin
-#   valor recomendado en el PDF; elegido > grab_window a proposito).
+#   3. FILTRO 2: DESPLAZAMIENTO / MOMENTUM (huella institucional)
+#        Tras pasar el filtro ATR, el swing queda "pendiente de
+#        confirmacion por desplazamiento": dentro de las V_desp velas
+#        siguientes al pivote, el precio debe recorrer al menos
+#        (U_desp * ATR[t]) en contra del pivote (hacia abajo si es
+#        maximo, hacia arriba si es minimo). Si V_desp velas pasan sin
+#        lograrlo, el swing se descarta definitivamente. Mientras el
+#        swing esta pendiente, NO se expone ni se usa para clasificar.
+#
+#   4. ALTERNANCIA ESTRICTA (ZigZag)
+#        La secuencia de swings consolidados debe alternar SIEMPRE H-L-H-L...
+#        Si el nuevo swing es del MISMO tipo que el ultimo swing consolidado:
+#          - Si es MAS EXTREMO (High mayor, o Low menor) que ese ultimo swing,
+#            LO REEMPLAZA (el anterior se descarta: era un maximo/minimo
+#            intermedio, no el extremo real del tramo).
+#          - Si NO es mas extremo, el nuevo candidato se descarta y el
+#            anterior se mantiene.
+#        Solo cuando el nuevo swing es de tipo OPUESTO al ultimo consolidado
+#        se agrega como swing nuevo en la secuencia.
+#
+#   5. CLASIFICACION (solo swings que sobreviven 1, 2 y 3)
+#        Highs: nuevo Max > Max consolidado anterior -> HH; si no -> LH.
+#        Lows : nuevo Min >= Min consolidado anterior -> HL; si no -> LL.
+#        El primer swing de cada tipo (sin referencia previa) se marca
+#        como HH o LL respectivamente (punto de partida, sin contexto).
+#
+#   6. TREND LINE
+#        Polilinea construida con TODOS los swings consolidados (highs y
+#        lows intercalados por indice/tiempo, sin distinguir tipo), en
+#        el orden en que fueron confirmados.
 # =============================================================================
 
 use strict;
@@ -80,359 +67,434 @@ use warnings;
 sub new {
     my ( $class, %args ) = @_;
     my $self = {
-        k            => $args{k}            // 3,
-        eq_factor    => $args{eq_factor}    // 0.10,
-        grab_window  => $args{grab_window}  // 3,
-        acceptance_n => $args{acceptance_n} // 10,
-        atr          => $args{atr},   # referencia DIRECTA al objeto ATR
+        atr           => $args{atr},              # Indicators::ATR (get_values)
+        fractal_n     => $args{fractal_n} // $args{k} // 3,   # N velas a cada lado
+        m_atr         => $args{m_atr}     // 1.5,  # multiplicador filtro volatilidad
+        atr_period    => $args{atr_period}// 14,   # informativo (el ATR ya trae su periodo)
+        v_desp        => $args{v_desp}    // 10,   # ventana max. de velas para el impulso
+        u_desp        => $args{u_desp}    // 2.0,  # multiplicador ATR de recorrido minimo
 
-        swings => [],   # todos los swings confirmados, en orden de confirmacion
-        levels => [],   # TODOS los niveles (cualquier estado), en orden de creacion
-        equals => [],   # pares EQH/EQL (puramente geometrico, no es un "nivel")
-        events => [],   # eventos Sweep/Grab/Run ya resueltos
+        _c   => [],   # velas conocidas (indice = indice de vela global)
+        _atr => [],   # cache local de get_values() del ATR, se refresca cada update
 
-        _open_level_refs      => [],   # niveles en DETECTED o SWEPT (working set)
-        _next_id               => 1,
-        _last_evaluated_index  => -1,  # ultimo candidato de swing ya evaluado
+        # Candidatos fractales brutos, a la espera de N velas futuras para
+        # confirmar fractalidad. { index, kind => 'H'|'L', price }
+        _pending_fractal => [],
+
+        # Candidatos que pasaron fractalidad + filtro ATR, a la espera de
+        # desplazamiento dentro de v_desp velas.
+        # { index, kind, price, deadline, extreme }
+        _pending_displacement => [],
+
+        # Swings totalmente consolidados (pasaron los 2 filtros), en orden
+        # cronologico. Cada uno: { id, index, ts, kind => 'H'|'L', price }
+        _swings => [],
+        _next_id => 1,
+
+        # Ultimo swing consolidado por tipo (para filtro ATR y clasificacion)
+        _last_H => undef,   # { index, price }
+        _last_L => undef,
+
+        # Etiquetas de estructura por indice de swing: 'HH'|'HL'|'LH'|'LL'
+        _labels => {},
+
+        # Linea de tendencia: puntos [{index, price}], un punto por swing
+        # consolidado, en orden cronologico (highs y lows intercalados).
+        _trendline => [],
+
+        # BSL/SSL, EQH/EQL, eventos (Sweep/Grab/Run): mantenidos para
+        # compatibilidad con el overlay existente. Fase de liquidez pura
+        # (no SMC) se limita aqui a estructura + swings; estos quedan
+        # vacios/placeholder hasta que se aborde esa fase por separado.
+        _levels => [],
+        _equals => [],
+        _events => [],
     };
-
-    die "Market::Indicators::Liquidity: acceptance_n debe ser > grab_window "
-      . "(SWEEP nunca podria ocurrir si no)"
-      if $self->{acceptance_n} <= $self->{grab_window};
-
     bless $self, $class;
     return $self;
 }
 
-# -----------------------------------------------------------------------------
-# reset
-# -----------------------------------------------------------------------------
 sub reset {
     my ($self) = @_;
-    $self->{swings} = [];
-    $self->{levels} = [];
-    $self->{equals} = [];
-    $self->{events} = [];
-    $self->{_open_level_refs}     = [];
-    $self->{_next_id}             = 1;
-    $self->{_last_evaluated_index} = -1;
+    $self->{_c}   = [];
+    $self->{_atr} = [];
+    $self->{_pending_fractal}      = [];
+    $self->{_pending_displacement} = [];
+    $self->{_swings}  = [];
+    $self->{_next_id} = 1;
+    $self->{_last_H} = undef;
+    $self->{_last_L} = undef;
+    $self->{_labels} = {};
+    $self->{_trendline} = [];
+    $self->{_levels} = [];
+    $self->{_equals} = [];
+    $self->{_events} = [];
 }
 
+sub get_values { return []; }
+
 # -----------------------------------------------------------------------------
-# Accesores de solo lectura
+# Accesores de solo lectura para overlays / SMC_Structures.
 # -----------------------------------------------------------------------------
-sub get_values { return $_[0]->{levels}; }
-sub get_swings { return $_[0]->{swings}; }
-sub get_levels { return $_[0]->{levels}; }
-sub get_equals { return $_[0]->{equals}; }
-sub get_events { return $_[0]->{events}; }
+sub get_swings       { return $_[0]->{_swings}; }
+sub get_swing_labels { return $_[0]->{_labels}; }
+sub get_trendline    { return $_[0]->{_trendline}; }
+sub get_levels       { return $_[0]->{_levels}; }
+sub get_equals       { return $_[0]->{_equals}; }
+sub get_events       { return $_[0]->{_events}; }
 
 sub last_swing_high {
     my ($self) = @_;
-    for my $sw ( reverse @{ $self->{swings} } ) {
-        return $sw if $sw->{kind} eq 'H';
+    for ( my $i = $#{ $self->{_swings} }; $i >= 0; $i-- ) {
+        my $s = $self->{_swings}[$i];
+        return { index => $s->{index}, price => $s->{price} } if $s->{kind} eq 'H';
     }
     return undef;
 }
 
 sub last_swing_low {
     my ($self) = @_;
-    for my $sw ( reverse @{ $self->{swings} } ) {
-        return $sw if $sw->{kind} eq 'L';
+    for ( my $i = $#{ $self->{_swings} }; $i >= 0; $i-- ) {
+        my $s = $self->{_swings}[$i];
+        return { index => $s->{index}, price => $s->{price} } if $s->{kind} eq 'L';
     }
     return undef;
 }
 
-sub side_label {
-    my ( $self, $side ) = @_;
-    return $side eq 'buy' ? 'BSL' : 'SSL';
-}
-
 # -----------------------------------------------------------------------------
-# update_last (streaming / replay incremental)
-# -----------------------------------------------------------------------------
-sub update_last {
-    my ( $self, $market_data ) = @_;
-    my $idx = $market_data->last_index;
-    return if $idx < 0;
-    $self->update_at_index( $market_data, $idx );
-}
-
-# -----------------------------------------------------------------------------
-# update_at_index (rebuild / cada vela nueva visible)
-# Orden: (1) maquina de estados sobre niveles ya abiertos, usando la vela
-# $i directamente; (2) deteccion de swing en el candidato c=i-k. El orden
-# es seguro en ambos sentidos: un nivel recien creado en (2) no puede ser
-# barrido por su propia vela de confirmacion (ya se verifico que esa vela
-# NO supera el nivel, es parte de la propia definicion de swing), asi que
-# no importa si (2) ocurriera antes de (1).
+# update_at_index / update_last: contrato del IndicatorManager.
 # -----------------------------------------------------------------------------
 sub update_at_index {
-    my ( $self, $market_data, $i ) = @_;
-
-    $self->_update_state_machine( $market_data, $i );
-
-    my $k = $self->{k};
-    my $c = $i - $k;
-    return if $c < $k;
-    return if $c <= $self->{_last_evaluated_index};
-
-    $self->_evaluate_swing_candidate( $market_data, $c, $k );
-    $self->{_last_evaluated_index} = $c;
+    my ( $self, $md, $idx ) = @_;
+    my $c = $md->get_candle($idx);
+    return unless defined $c;
+    $self->_ingest($md, $c, $idx);
 }
 
-# =============================================================================
-# SWING POINTS / EQH-EQL
-# =============================================================================
+sub update_last {
+    my ( $self, $md ) = @_;
+    my $idx = $md->last_index if $md->can('last_index');
+    my $c   = $md->last_candle;
+    return unless defined $c;
+    $idx = $#{ $self->{_c} } + 1 unless defined $idx;
+    $self->_ingest($md, $c, $idx);
+}
+
+sub _ingest {
+    my ( $self, $md, $c, $idx ) = @_;
+    $self->{_c}[$idx] = $c;
+
+    my $atr_arr = $self->{atr} && $self->{atr}->can('get_values')
+        ? $self->{atr}->get_values
+        : undef;
+    $self->{_atr} = $atr_arr if $atr_arr;
+
+    $self->_try_confirm_fractals($idx);
+    $self->_check_displacement($idx);
+}
 
 # -----------------------------------------------------------------------------
-# _evaluate_swing_candidate (privado)
-# High[c] > High[c-k..c-1] y High[c] > High[c+1..c+k] (estrictamente mayor
-# que TODAS, no solo el maximo) -- analogo para Low.
+# _try_confirm_fractals: intenta confirmar fractalidad en (idx - N), ahora que
+# ya se conoce hasta idx (>= (idx-N)+N). Solo evalua UNA vez el candidato
+# (idx - N); si idx < N no hay nada que evaluar todavia.
 # -----------------------------------------------------------------------------
-sub _evaluate_swing_candidate {
-    my ( $self, $market_data, $c, $k ) = @_;
+sub _try_confirm_fractals {
+    my ( $self, $idx ) = @_;
+    my $n = $self->{fractal_n};
+    my $t = $idx - $n;
+    return if $t < $n;                      # no hay N velas a la izquierda aun
+    return unless defined $self->{_c}[$t];
 
-    my $candle = $market_data->get_candle($c);
-    return unless $candle;
-
-    my ( $is_high, $is_low ) = ( 1, 1 );
-    for my $j ( ( $c - $k ) .. ( $c + $k ) ) {
-        next if $j == $c;
-        my $other = $market_data->get_candle($j);
-        return unless $other;   # defensivo: no deberia faltar en este rango
-
-        $is_high = 0 if $other->{high} >= $candle->{high};
-        $is_low  = 0 if $other->{low}  <= $candle->{low};
-        last if !$is_high && !$is_low;
+    my $c = $self->{_c};
+    for my $i ( 1 .. $n ) {
+        return unless defined $c->[ $t - $i ] && defined $c->[ $t + $i ];
     }
 
-    $self->_register_swing( 'H', $market_data, $candle, $c ) if $is_high;
-    $self->_register_swing( 'L', $market_data, $candle, $c ) if $is_low;
+    my $is_high = 1;
+    my $is_low  = 1;
+    for my $i ( 1 .. $n ) {
+        $is_high = 0 if !( $c->[$t]{high} > $c->[ $t - $i ]{high}
+                         && $c->[$t]{high} > $c->[ $t + $i ]{high} );
+        $is_low  = 0 if !( $c->[$t]{low}  < $c->[ $t - $i ]{low}
+                         && $c->[$t]{low}  < $c->[ $t + $i ]{low} );
+    }
+
+    return unless $is_high || $is_low;
+
+    my $atr_t = $self->_atr_at($t);
+    return unless defined $atr_t && $atr_t > 0;   # sin ATR valido no se puede filtrar
+
+    if ($is_high) {
+        $self->_apply_atr_filter( $t, 'H', $c->[$t]{high}, $atr_t );
+    }
+    if ($is_low) {
+        $self->_apply_atr_filter( $t, 'L', $c->[$t]{low}, $atr_t );
+    }
+}
+
+sub _atr_at {
+    my ( $self, $t ) = @_;
+    my $arr = $self->{_atr};
+    return undef unless $arr && ref($arr) eq 'ARRAY';
+    return $arr->[$t];
 }
 
 # -----------------------------------------------------------------------------
-# _register_swing (privado)
+# FILTRO 1 (ATR): distancia vertical desde el nuevo swing hasta el ULTIMO
+# SWING CONSOLIDADO DEL TIPO OPUESTO debe ser > m_ATR * ATR[t].
+# Si no hay swing opuesto previo (arranque de la serie), se acepta el primer
+# candidato de cada tipo sin filtro (no hay contra que comparar).
+# Si pasa, el candidato entra a la cola de validacion por desplazamiento.
 # -----------------------------------------------------------------------------
-sub _register_swing {
-    my ( $self, $kind, $market_data, $candle, $idx ) = @_;
+sub _apply_atr_filter {
+    my ( $self, $t, $kind, $price, $atr_t ) = @_;
+
+    my $opposite = ( $kind eq 'H' ) ? $self->{_last_L} : $self->{_last_H};
+
+    if ( defined $opposite ) {
+        my $dist = abs( $price - $opposite->{price} );
+        my $min_req = $self->{m_atr} * $atr_t;
+        return if !( $dist > $min_req );   # ruido: se descarta, no se re-evalua
+    }
+
+    push @{ $self->{_pending_displacement} }, {
+        index    => $t,
+        kind     => $kind,
+        price    => $price,
+        atr      => $atr_t,
+        deadline => $t + $self->{v_desp},
+        extreme  => $price,   # se actualiza mientras esta pendiente (ver abajo)
+    };
+}
+
+# -----------------------------------------------------------------------------
+# FILTRO 2 (DESPLAZAMIENTO): recorre los candidatos pendientes en cada vela
+# nueva (idx). Si dentro de v_desp velas el precio se mueve al menos
+# u_desp * ATR[t] en contra del pivote, se consolida. Si se agota la ventana
+# sin lograrlo, se descarta.
+# -----------------------------------------------------------------------------
+sub _check_displacement {
+    my ( $self, $idx ) = @_;
+    return unless @{ $self->{_pending_displacement} };
+
+    my $c   = $self->{_c}[$idx];
+    return unless defined $c;
+
+    my @still_pending;
+    for my $cand ( @{ $self->{_pending_displacement} } ) {
+        if ( $idx <= $cand->{index} ) { push @still_pending, $cand; next; }
+
+        my $required = $self->{u_desp} * $cand->{atr};
+
+        if ( $cand->{kind} eq 'H' ) {
+            $cand->{extreme} = $c->{low} if $c->{low} < $cand->{extreme};
+            my $travel = $cand->{price} - $cand->{extreme};
+            if ( $travel >= $required ) {
+                $self->_consolidate($cand);
+                next;
+            }
+        }
+        else {
+            $cand->{extreme} = $c->{high} if $c->{high} > $cand->{extreme};
+            my $travel = $cand->{extreme} - $cand->{price};
+            if ( $travel >= $required ) {
+                $self->_consolidate($cand);
+                next;
+            }
+        }
+
+        if ( $idx >= $cand->{deadline} ) {
+            next;   # se agoto la ventana sin desplazamiento: descartado
+        }
+        push @still_pending, $cand;
+    }
+    $self->{_pending_displacement} = \@still_pending;
+}
+
+# -----------------------------------------------------------------------------
+# _consolidate: swing validado (paso ATR + desplazamiento). Antes de
+# registrarlo se fuerza ALTERNANCIA ESTRICTA (ver punto 4 del pipeline):
+#   - Si el ULTIMO swing de la secuencia (por indice, no por confirmacion)
+#     es del MISMO tipo que este candidato, no se agrega uno nuevo: se
+#     compara contra ese swing y solo sobrevive el mas extremo (el otro se
+#     descarta / reemplaza). El swing reemplazado se retira tambien de la
+#     trend line y de las etiquetas.
+#   - Si es de tipo OPUESTO, se inserta normalmente en la secuencia.
+#
+# Esta regla es la que garantiza que el patron de estructura sea siempre
+# H-L-H-L... (nunca dos maximos ni dos minimos consecutivos en la secuencia
+# de swings expuesta al overlay y a SMC_Structures).
+#
+# La insercion sigue siendo por indice (no por orden de confirmacion) por la
+# misma razon documentada en _insert_sorted_by_index: el filtro de
+# desplazamiento puede confirmar swings fuera de orden cronologico.
+# -----------------------------------------------------------------------------
+sub _consolidate {
+    my ( $self, $cand ) = @_;
 
     my $swing = {
         id    => $self->{_next_id}++,
-        kind  => $kind,   # 'H' | 'L'
-        index => $idx,
-        ts    => $candle->{ts},
-        price => ( $kind eq 'H' ? $candle->{high} : $candle->{low} ),
+        index => $cand->{index},
+        ts    => $self->{_c}[ $cand->{index} ]{ts},
+        kind  => $cand->{kind},
+        price => $cand->{price},
     };
-    push @{ $self->{swings} }, $swing;
 
-    my $level = $self->_register_level( $kind, $swing, $market_data );
-    push @{ $self->{_open_level_refs} }, $level;
+    my $pos = $self->_find_insert_pos( $swing->{index} );
+    my $left  = $pos > 0 ? $self->{_swings}[ $pos - 1 ] : undef;
+    my $right = $pos <= $#{ $self->{_swings} } ? $self->{_swings}[$pos] : undef;
 
-    $self->_check_equal_levels( $kind, $swing );
+    my $same_kind_neighbor =
+        ( defined $left  && $left->{kind}  eq $swing->{kind} ) ? $left  :
+        ( defined $right && $right->{kind} eq $swing->{kind} ) ? $right :
+        undef;
+
+    if ( defined $same_kind_neighbor ) {
+        my $new_is_more_extreme =
+            ( $swing->{kind} eq 'H' )
+                ? ( $swing->{price} > $same_kind_neighbor->{price} )
+                : ( $swing->{price} < $same_kind_neighbor->{price} );
+
+        return unless $new_is_more_extreme;   # candidato no es el extremo real: descartado
+
+        $self->_remove_swing($same_kind_neighbor);
+        $pos = $self->_find_insert_pos( $swing->{index} );
+    }
+
+    splice( @{ $self->{_swings} }, $pos, 0, $swing );
+
+    $self->_classify($swing);
+
+    $self->_insert_sorted_by_index( $self->{_trendline}, { index => $swing->{index}, price => $swing->{price} } );
+
+    $self->_refresh_last_refs();
 }
 
 # -----------------------------------------------------------------------------
-# _register_level (privado)
-# side 'buy' = BSL (de un swing high) | 'sell' = SSL (de un swing low).
-# Nace en estado DETECTED (Estado 1 del diagrama del PDF).
+# _find_insert_pos: posicion donde deberia insertarse un swing con este
+# index para mantener _swings ordenado ascendente por index.
 # -----------------------------------------------------------------------------
-sub _register_level {
-    my ( $self, $kind, $swing, $market_data ) = @_;
-
-    my $level = {
-        id                => $self->{_next_id}++,
-        side              => ( $kind eq 'H' ? 'buy' : 'sell' ),
-        price             => $swing->{price},
-        index             => $swing->{index},
-        origin_swing_id   => $swing->{id},
-        state             => 'DETECTED',
-        classification    => undef,
-        swept_at_index    => undef,
-        resolved_at_index => undef,
-
-        # Etapa 6 (Fase 2): pesado de volumen multi-temporal + origen de TF.
-        origin_tf => undef,
-        volumes   => { '1m' => 0, '5m' => 0, '15m' => 0 },
-    };
-
-    $self->_attach_multi_tf_volume( $level, $swing, $market_data ) if $market_data;
-
-    push @{ $self->{levels} }, $level;
-    return $level;
+sub _find_insert_pos {
+    my ( $self, $index ) = @_;
+    my $swings = $self->{_swings};
+    my $i = $#$swings;
+    while ( $i >= 0 && $swings->[$i]{index} > $index ) { $i--; }
+    return $i + 1;
 }
 
 # -----------------------------------------------------------------------------
-# _attach_multi_tf_volume (privado) -- Etapa 6, Fase 2
-# Calcula y almacena en el nivel el volumen observado en 1m/5m/15m durante
-# la ventana [ts, ts+interval) de la vela "macro" (TF activa al momento de
-# crear el nivel), independientemente de cual sea esa TF activa. Tambien
-# registra origin_tf (infraestructura para Interna/Externa -- ver nota de
-# alcance en la cabecera del archivo).
+# _remove_swing: retira un swing de _swings, _trendline y _labels por id.
+# Usado cuando un swing del mismo tipo mas extremo lo reemplaza.
+# -----------------------------------------------------------------------------
+sub _remove_swing {
+    my ( $self, $swing ) = @_;
+
+    my $swings = $self->{_swings};
+    for my $i ( 0 .. $#$swings ) {
+        if ( $swings->[$i]{id} == $swing->{id} ) {
+            splice( @$swings, $i, 1 );
+            last;
+        }
+    }
+
+    my $tl = $self->{_trendline};
+    for my $i ( 0 .. $#$tl ) {
+        if ( $tl->[$i]{index} == $swing->{index} ) {
+            splice( @$tl, $i, 1 );
+            last;
+        }
+    }
+
+    delete $self->{_labels}{ $swing->{index} };
+}
+
+# -----------------------------------------------------------------------------
+# _insert_sorted_by_index: inserta $item en $arr manteniendo orden ascendente
+# por {index}. Recorre desde el final porque en la practica la mayoria de las
+# confirmaciones SI llegan en orden (insercion casi siempre O(1) amortizado).
+# -----------------------------------------------------------------------------
+sub _insert_sorted_by_index {
+    my ( $self, $arr, $item ) = @_;
+    my $i = $#$arr;
+    while ( $i >= 0 && $arr->[$i]{index} > $item->{index} ) { $i--; }
+    splice( @$arr, $i + 1, 0, $item );
+}
+
+# -----------------------------------------------------------------------------
+# _refresh_last_refs: recalcula _last_H y _last_L a partir del ULTIMO swing
+# de cada tipo en orden cronologico real dentro de _swings (no del ultimo
+# confirmado por el motor de eventos). Necesario porque el filtro de
+# desplazamiento puede confirmar swings fuera de orden.
+# -----------------------------------------------------------------------------
+sub _refresh_last_refs {
+    my ($self) = @_;
+    $self->{_last_H} = undef;
+    $self->{_last_L} = undef;
+    my $swings = $self->{_swings};
+    for ( my $i = $#$swings; $i >= 0; $i-- ) {
+        my $s = $swings->[$i];
+        if ( $s->{kind} eq 'H' && !defined $self->{_last_H} ) {
+            $self->{_last_H} = { index => $s->{index}, price => $s->{price} };
+        }
+        if ( $s->{kind} eq 'L' && !defined $self->{_last_L} ) {
+            $self->{_last_L} = { index => $s->{index}, price => $s->{price} };
+        }
+        last if defined $self->{_last_H} && defined $self->{_last_L};
+    }
+}
+
+# -----------------------------------------------------------------------------
+# _classify: HH/LH para maximos, HL/LL para minimos, comparando SIEMPRE contra
+# el swing consolidado INMEDIATAMENTE ANTERIOR del MISMO tipo por indice
+# (no por orden de confirmacion). Como _swings esta siempre ordenado por
+# index, se busca el predecesor real recorriendo hacia atras desde la
+# posicion de insercion.
 #
-# NOTA: si la TF activa es 1m/5m/15m, el calculo sigue siendo correcto pero
-# parcialmente degenerado (alguna de las 3 sub-temporalidades puede no
-# "encajar" una vela completa dentro de una ventana mas angosta que su
-# propio ancho de bucket -- ver MarketData::sum_volume_for_tf_window). No es
-# un error: es la consecuencia matematica de pedir un desglose mas fino que
-# el ancho de la propia ventana.
+# Tambien reclasifica el swing SIGUIENTE del mismo tipo si existe, porque al
+# insertar este swing en medio de la secuencia (confirmacion fuera de orden),
+# ese siguiente pudo haber sido clasificado contra un predecesor equivocado.
 # -----------------------------------------------------------------------------
-sub _attach_multi_tf_volume {
-    my ( $self, $level, $swing, $market_data ) = @_;
+sub _classify {
+    my ( $self, $swing ) = @_;
 
-    my $tf = $market_data->get_timeframe;
-    $level->{origin_tf} = $tf;
+    my $swings = $self->{_swings};
+    my $pos = -1;
+    for my $i ( 0 .. $#$swings ) {
+        if ( $swings->[$i]{id} == $swing->{id} ) { $pos = $i; last; }
+    }
+    return if $pos < 0;
 
-    my $interval = $market_data->tf_interval_seconds($tf);
-    return unless defined $interval;   # TF desconocida: deja volumes en 0
+    my $prev = $self->_find_neighbor_same_kind( $pos, -1, $swing->{kind} );
+    $self->{_labels}{ $swing->{index} } = $self->_label_for( $swing, $prev );
 
-    my $ts_start = $swing->{ts};
-    my $ts_end   = $ts_start + $interval;
-
-    for my $sub_tf ( '1m', '5m', '15m' ) {
-        $level->{volumes}{$sub_tf} =
-            $market_data->sum_volume_for_tf_window( $sub_tf, $ts_start, $ts_end );
+    my $next = $self->_find_neighbor_same_kind( $pos, 1, $swing->{kind} );
+    if ($next) {
+        $self->{_labels}{ $next->{index} } = $self->_label_for( $next, $swing );
     }
 }
 
-# -----------------------------------------------------------------------------
-# is_internal (Etapa 6, Fase 2)
-# Compara el origin_tf del nivel contra la TF actualmente activa. Con la
-# arquitectura actual (una sola instancia de Liquidity viva por TF, ver nota
-# de alcance en la cabecera) esto sera SIEMPRE 1 (todo nivel vigente fue
-# creado en la TF que esta activa ahora, porque cualquier cambio de TF
-# reconstruye el indicador desde cero). El campo y el metodo quedan listos
-# para cuando exista coexistencia real multi-TF (2a entrega).
-# -----------------------------------------------------------------------------
-sub is_internal {
-    my ( $self, $level, $current_tf ) = @_;
-    return 1 unless defined $level->{origin_tf};
-    return $level->{origin_tf} eq $current_tf ? 1 : 0;
-}
-
-# -----------------------------------------------------------------------------
-# _check_equal_levels (privado)
-# Compara el swing recien confirmado contra TODOS los swings previos del
-# mismo tipo. Cada par dentro de tolerancia genera una entrada en
-# get_equals() (puramente geometrica/informativa, no crea un nivel nuevo
-# ni afecta la maquina de estados del nivel ya registrado por el swing).
-# -----------------------------------------------------------------------------
-sub _check_equal_levels {
-    my ( $self, $kind, $new_swing ) = @_;
-    return unless $self->{atr};
-
-    my $atr_values = $self->{atr}->get_values;
-    return unless $atr_values && @$atr_values;
-
-    my $atr_at_new = $atr_values->[ $new_swing->{index} ];
-    return unless defined $atr_at_new;
-
-    my $tolerance = $atr_at_new * $self->{eq_factor};
-
-    for my $prev ( @{ $self->{swings} } ) {
-        next if $prev->{id} == $new_swing->{id};
-        next unless $prev->{kind} eq $kind;
-
-        my $diff = abs( $prev->{price} - $new_swing->{price} );
-        next if $diff > $tolerance;
-
-        push @{ $self->{equals} }, {
-            kind => ( $kind eq 'H' ? 'EQH' : 'EQL' ),
-            i1   => $prev->{index},
-            i2   => $new_swing->{index},
-            p1   => $prev->{price},
-            p2   => $new_swing->{price},
-        };
+sub _find_neighbor_same_kind {
+    my ( $self, $pos, $step, $kind ) = @_;
+    my $swings = $self->{_swings};
+    my $i = $pos + $step;
+    while ( $i >= 0 && $i <= $#$swings ) {
+        return $swings->[$i] if $swings->[$i]{kind} eq $kind;
+        $i += $step;
     }
+    return undef;
 }
 
-# =============================================================================
-# MAQUINA DE ESTADOS: Detected -> Swept -> (Acceptance|Reclaimed) -> Resolved
-# =============================================================================
+sub _label_for {
+    my ( $self, $swing, $prev ) = @_;
 
-sub _update_state_machine {
-    my ( $self, $market_data, $i ) = @_;
-    my $candle = $market_data->get_candle($i);
-    return unless $candle;
-
-    my @still_open;
-    for my $level ( @{ $self->{_open_level_refs} } ) {
-        if ( $level->{state} eq 'DETECTED' ) {
-            $self->_check_sweep( $level, $candle, $i );
-        }
-        if ( $level->{state} eq 'SWEPT' ) {
-            $self->_check_resolution( $level, $candle, $i );
-        }
-        push @still_open, $level unless $level->{state} eq 'RESOLVED';
+    if ( $swing->{kind} eq 'H' ) {
+        return 'HH' if !defined $prev;
+        return $swing->{price} > $prev->{price} ? 'HH' : 'LH';
     }
-    $self->{_open_level_refs} = \@still_open;
-}
-
-# -----------------------------------------------------------------------------
-# _check_sweep (privado) -- Estado 1 (Detected) -> Estado 2 (Swept)
-# BSL ('buy'): High > price.  SSL ('sell'): Low < price.
-# -----------------------------------------------------------------------------
-sub _check_sweep {
-    my ( $self, $level, $candle, $i ) = @_;
-
-    my $swept =
-        ( $level->{side} eq 'buy' )
-      ? ( $candle->{high} > $level->{price} )
-      : ( $candle->{low}  < $level->{price} );
-    return unless $swept;
-
-    $level->{state}          = 'SWEPT';
-    $level->{swept_at_index} = $i;
-}
-
-# -----------------------------------------------------------------------------
-# _check_resolution (privado) -- Estado 2 (Swept) -> Estado 5 (Resolved)
-# n_since incluye la propia vela del sweep (n_since=1 en esa misma vela).
-# -----------------------------------------------------------------------------
-sub _check_resolution {
-    my ( $self, $level, $candle, $i ) = @_;
-
-    my $n_since = $i - $level->{swept_at_index} + 1;
-
-    my $closed_inside =
-        ( $level->{side} eq 'buy' )
-      ? ( $candle->{close} <= $level->{price} )
-      : ( $candle->{close} >= $level->{price} );
-
-    if ($closed_inside) {
-        my $classification =
-            ( $n_since <= $self->{grab_window} ) ? 'GRAB' : 'SWEEP';
-        $self->_resolve( $level, $classification, $i );
-        return;
+    else {
+        return 'LL' if !defined $prev;
+        return $swing->{price} >= $prev->{price} ? 'HL' : 'LL';
     }
-
-    if ( $n_since >= $self->{acceptance_n} ) {
-        $self->_resolve( $level, 'RUN', $i );
-        return;
-    }
-
-    # Sigue abierto (Swept), esperando resolucion en velas siguientes.
-}
-
-# -----------------------------------------------------------------------------
-# _resolve (privado) -- Estado 5 (Resolved): clasificacion final inmutable
-# + emite el evento correspondiente para get_events().
-# -----------------------------------------------------------------------------
-sub _resolve {
-    my ( $self, $level, $classification, $i ) = @_;
-
-    $level->{state}             = 'RESOLVED';
-    $level->{classification}    = $classification;
-    $level->{resolved_at_index} = $i;
-
-    my $dir = ( $level->{side} eq 'buy' ) ? 'up' : 'down';
-    push @{ $self->{events} }, {
-        type  => $classification,   # 'SWEEP' | 'GRAB' | 'RUN'
-        dir   => $dir,              # 'up' | 'down'
-        index => $i,                # vela de RESOLUCION (no la del sweep)
-        price => $level->{price},
-        label => $self->side_label( $level->{side} ) . ' ' . $classification,
-    };
 }
 
 1;

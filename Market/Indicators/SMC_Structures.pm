@@ -1,22 +1,64 @@
 package Market::Indicators::SMC_Structures;
 
 # =============================================================================
-# Market::Indicators::SMC_Structures   (Tabla 1 del PDF)
+# Market::Indicators::SMC_Structures
 #
-# Calculo algoritmico de BOS, CHoCH y FVG, con integracion nativa con los
-# vectores de liquidez (lee los Swing Points ya confirmados por
-# Indicators/Liquidity.pm para resolver la estructura de mercado).
-# SOLO calcula: el dibujo es de Overlays/SMC_Structures.pm.
+# Calculo de BOS (Break of Structure) e iBOS (Internal Break of Structure)
+# a partir de los Swing Points ya confirmados por Indicators/Liquidity.pm
+# (filtrados por ATR + desplazamiento). SOLO calcula: el dibujo es de
+# Overlays/SMC_Structures.pm.
 #
-# Anti-futuro: procesa vela a vela. El FVG se confirma al cerrar la 3a vela
-# del patron; la mitigacion y el desvanecimiento dependen unicamente de las
-# velas ya disponibles (el "avance real" del replay), nunca de velas futuras.
+# A diferencia de un BOS "clasico" que recalcula sus propios pivotes con una
+# ventana fractal fija (length_bos / length_ibos sobre precio crudo), este
+# modulo reutiliza los swings YA validados por Liquidity (que aplican el
+# filtro de volatilidad ATR y el filtro de desplazamiento/momentum). Esto
+# evita procesar dos veces la deteccion de pivotes y mantiene una sola
+# fuente de verdad para "que es un swing valido" en todo el sistema.
 #
-# Para esta entrega (29/06) SMC se entrega como "avances": FVG completo +
-# BOS/CHoCH basicos. Fibonacci se reserva para la 2a presentacion.
+# -----------------------------------------------------------------------------
+# NIVELES Y ESTADO (Memoria del Mercado)
 #
-# Referencias: Teoria1.txt (BOS valido = cierre de cuerpo mas alla del nivel;
-# CHoCH = ruptura de la ultima estructura mayor opuesta), seccion 4-5 del PDF.
+#   $bos_high / $bos_low   : precio del ultimo Swing High / Low PRINCIPAL
+#                             (estructura mayor) aun no roto.
+#   $ibos_high / $ibos_low : precio del ultimo Swing High / Low INTERNO
+#                             (subestructura) aun no roto.
+#
+#   "Principal" vs "interno" se distingue por MAGNITUD del swing: un swing
+#   es principal si su rango de precio (contra el swing opuesto mas
+#   reciente) es >= al de los ultimos N swings del mismo tipo (el swing
+#   mas extremo reciente marca estructura mayor); cualquier swing menor
+#   que quede dentro de ese rango es subestructura (interno). En terminos
+#   practicos: el swing MAS RECIENTE de cada tipo es candidato a
+#   $bos_high/$bos_low; los swings intermedios que aparecen mientras ese
+#   nivel no se ha roto se tratan como $ibos_high/$ibos_low.
+#
+# -----------------------------------------------------------------------------
+# DETECCION DE QUIEBRE (BOS / iBOS)
+#
+#   $break_mode = 'close' (por defecto) o 'wick':
+#     'close': ruptura alcista si close > nivel; ruptura bajista si close < nivel.
+#     'wick' : ruptura alcista si high  > nivel; ruptura bajista si low   < nivel.
+#
+#   BOS  (estructura principal):
+#     - Ruptura alcista de $bos_high -> evento { type=>'BOS', dir=>'up' }.
+#       $bos_high se invalida (undef); se vuelve a armar con el siguiente
+#       Swing High confirmado.
+#     - Ruptura bajista de $bos_low  -> evento { type=>'BOS', dir=>'down' }.
+#       $bos_low se invalida (undef); idem con el siguiente Swing Low.
+#     - Regla de reinicio: al confirmarse un BOS (cualquier direccion),
+#       TODOS los niveles iBOS activos se invalidan de inmediato (undef),
+#       forzando a recalcular la subestructura desde el nuevo punto de
+#       partida macro.
+#
+#   iBOS (subestructura): misma logica que BOS pero sobre $ibos_high /
+#     $ibos_low. No dispara reinicio de nada mas.
+#
+# -----------------------------------------------------------------------------
+# PREVENCION DE REPETICIONES
+#
+#   Un nivel roto queda "mitigado": se invalida (undef) de inmediato y NO
+#   vuelve a evaluarse hasta que nazca un nuevo pivote intermedio que lo
+#   reemplace. No hay reintento sobre el mismo precio en velas consecutivas.
 # =============================================================================
 
 use strict;
@@ -25,25 +67,35 @@ use warnings;
 sub new {
     my ( $class, %args ) = @_;
     my $self = {
-        liquidity => $args{liquidity},        # indicador de liquidez (swings)
-        max_age   => $args{max_age} // 50,    # velas hasta expiracion visual del FVG
+        liquidity   => $args{liquidity},          # Indicators::Liquidity (swings)
+        break_mode  => $args{break_mode} // 'close',   # 'close' | 'wick'
 
-        _c       => [],    # velas procesadas
-        _fvgs    => [],    # zonas FVG (historico completo, para el overlay)
-        _active_fvgs => [],# FVG activos (aun no mitigados/expirados) a evaluar
-        _events  => [],    # eventos BOS / CHoCH
+        _c      => [],    # velas procesadas
+        _events => [],    # eventos BOS / iBOS confirmados
 
-        _bias   => undef,  # 'bull' | 'bear'
-        _bh_idx => -1,     # indice del ultimo swing high ya roto (anti-duplicado)
-        _bl_idx => -1,     # indice del ultimo swing low  ya roto
+        # Niveles activos (precio) aun no rotos. undef = sin nivel vigente.
+        _bos_high  => undef,
+        _bos_low   => undef,
+        _ibos_high => undef,
+        _ibos_low  => undef,
 
-        # HH/HL/LH/LL (estilo Mxwll Price Action Suite)
-        # _swing_labels: { swing_index => 'HH'|'HL'|'LH'|'LL' }
-        # _seen_swings : set de IDs ya etiquetados (anti-duplicado)
-        _swing_labels => {},
-        _seen_swings  => {},
-        _last_high    => undef,   # { index, price } del ultimo swing H etiquetado
-        _last_low     => undef,   # { index, price } del ultimo swing L etiquetado
+        # Indice del swing que sostiene cada nivel activo (para la linea del
+        # overlay, del pivote de origen a la vela de ruptura).
+        _bos_high_index  => undef,
+        _bos_low_index   => undef,
+        _ibos_high_index => undef,
+        _ibos_low_index  => undef,
+
+        # Ultimo swing high/low PRINCIPAL confirmado (referencia de
+        # magnitud: el mas reciente de cada tipo define bos_high/bos_low;
+        # cualquier swing del mismo tipo que aparezca despues, mientras ese
+        # nivel principal sigue sin romperse, es subestructura -> ibos).
+        _principal_high_index => undef,
+        _principal_low_index  => undef,
+
+        # Anti-duplicado: ids de swings ya consumidos (ya se uso su precio
+        # para fijar bos_high/bos_low/ibos_high/ibos_low al menos una vez).
+        _seen_swing_id => {},
     };
     bless $self, $class;
     return $self;
@@ -54,17 +106,18 @@ sub get_values { return []; }
 sub reset {
     my ($self) = @_;
     $self->{_c}      = [];
-    $self->{_fvgs}   = [];
-    $self->{_active_fvgs} = [];
     $self->{_events} = [];
-    $self->{_bias}   = undef;
-    $self->{_bh_idx} = -1;
-    $self->{_bl_idx} = -1;
-
-    $self->{_swing_labels} = {};
-    $self->{_seen_swings}  = {};
-    $self->{_last_high}    = undef;
-    $self->{_last_low}     = undef;
+    $self->{_bos_high}  = undef;
+    $self->{_bos_low}   = undef;
+    $self->{_ibos_high} = undef;
+    $self->{_ibos_low}  = undef;
+    $self->{_bos_high_index}  = undef;
+    $self->{_bos_low_index}   = undef;
+    $self->{_ibos_high_index} = undef;
+    $self->{_ibos_low_index}  = undef;
+    $self->{_principal_high_index} = undef;
+    $self->{_principal_low_index}  = undef;
+    $self->{_seen_swing_id} = {};
 }
 
 sub update_at_index {
@@ -82,166 +135,41 @@ sub update_last {
 }
 
 # Accesores de solo lectura para el Overlay.
-sub get_fvgs       { return $_[0]->{_fvgs}; }
-sub get_events     { return $_[0]->{_events}; }
-sub processed_last { return $#{ $_[0]->{_c} }; }   # ultima vela conocida (replay-aware)
-sub get_swing_labels { return $_[0]->{_swing_labels}; }  # { index => 'HH'|'HL'|'LH'|'LL' }
+sub get_events      { return $_[0]->{_events}; }
+sub processed_last  { return $#{ $_[0]->{_c} }; }
 
 # -----------------------------------------------------------------------------
 # _process: integra la vela en el indice i = $#_c.
+#   1. Incorpora los swings nuevos que Liquidity ya confirmo (pueden llegar
+#      con retraso respecto al indice actual: fractal_n + v_desp velas).
+#   2. Evalua ruptura de iBOS primero (subestructura, mas frecuente).
+#   3. Evalua ruptura de BOS (estructura principal). Si ocurre, invalida
+#      todo iBOS activo (regla de reinicio).
 # -----------------------------------------------------------------------------
 sub _process {
     my ( $self, $c ) = @_;
     push @{ $self->{_c} }, $c;
     my $i = $#{ $self->{_c} };
 
-    $self->_detect_fvg($i);
-    $self->_update_fvgs($i);
-    $self->_detect_bos_choch($i);
-    $self->_classify_swings();
+    $self->_ingest_new_swings($i);
+    $self->_check_break( $i, $c, 'ibos' );
+    $self->_check_break( $i, $c, 'bos' );
 }
 
 # -----------------------------------------------------------------------------
-# _detect_fvg: patron de 3 velas (i-2, i-1, i), confirmado al cerrar la vela i.
-#   Alcista: Low[i]  > High[i-2]  -> hueco entre High[i-2] (piso) y Low[i] (techo)
-#   Bajista: High[i] < Low[i-2]   -> hueco entre High[i] (piso) y Low[i-2] (techo)
+# _ingest_new_swings: recorre los swings confirmados por Liquidity que aun
+# no se han incorporado (anti-duplicado via _seen_swing_id) y que preceden
+# a la vela actual. Por cada swing nuevo:
+#   - Si no hay bos_high/bos_low vigente de ese tipo -> se convierte en
+#     PRINCIPAL (bos_*), estableciendo tambien el punto de referencia de
+#     magnitud (_principal_*_index).
+#   - Si YA hay un nivel principal vigente de ese tipo -> este swing es
+#     subestructura: alimenta ibos_high/ibos_low (se sobreescribe con el
+#     mas reciente, ya que el iBOS relevante es siempre el ultimo pivote
+#     intermedio antes de la ruptura).
 # -----------------------------------------------------------------------------
-sub _detect_fvg {
+sub _ingest_new_swings {
     my ( $self, $i ) = @_;
-    return if $i < 2;
-    my $c  = $self->{_c};
-    my $a  = $c->[ $i - 2 ];
-    my $z  = $c->[$i];
-
-    my $fvg;
-    if ( $z->{low} > $a->{high} ) {
-        $fvg = $self->_make_fvg( 'bull', $i, $a->{high}, $z->{low} );
-    }
-    elsif ( $z->{high} < $a->{low} ) {
-        $fvg = $self->_make_fvg( 'bear', $i, $z->{high}, $a->{low} );
-    }
-    if ($fvg) {
-        push @{ $self->{_fvgs} }, $fvg;          # historico (overlay)
-        push @{ $self->{_active_fvgs} }, $fvg;   # a evaluar (mitigacion/edad)
-    }
-}
-
-sub _make_fvg {
-    my ( $self, $dir, $i, $bottom, $top ) = @_;
-    my $c = $self->{_c};
-    return {
-        dir       => $dir,                 # 'bull' | 'bear'
-        idx_start => $i - 2,               # 1a vela del patron
-        ts_start  => $c->[ $i - 2 ]{ts},
-        idx_create => $i,                  # vela de confirmacion (3a)
-        ts_create => $c->[$i]{ts},
-        created   => $i,
-        bottom    => $bottom,              # precio inferior de la zona
-        top       => $top,                 # precio superior de la zona
-        state     => 'active',             # active | mitigated | expired
-        mitig_at  => undef,
-    };
-}
-
-# -----------------------------------------------------------------------------
-# _update_fvgs: actualiza mitigacion y expiracion usando SOLO la vela actual.
-#   Alcista mitigado : Low[i]  <= bottom  (el precio rellena el hueco)
-#   Bajista mitigado : High[i] >= top
-#   Expirado         : edad (i - created) > max_age  (deja de dibujarse pero
-#                      NO se borra: se conserva para la fase 2).
-# -----------------------------------------------------------------------------
-sub _update_fvgs {
-    my ( $self, $i ) = @_;
-    my $cur = $self->{_c}[$i];
-    my @keep;
-    for my $f ( @{ $self->{_active_fvgs} } ) {
-        if ( $i <= $f->{created} ) { push @keep, $f; next; }
-
-        if ( $f->{dir} eq 'bull' && $cur->{low} <= $f->{bottom} ) {
-            $f->{state} = 'mitigated'; $f->{mitig_at} = $i; next;   # sale del set
-        }
-        if ( $f->{dir} eq 'bear' && $cur->{high} >= $f->{top} ) {
-            $f->{state} = 'mitigated'; $f->{mitig_at} = $i; next;
-        }
-        if ( ( $i - $f->{created} ) > $self->{max_age} ) {
-            $f->{state} = 'expired'; next;                          # sale del set
-        }
-        push @keep, $f;
-    }
-    $self->{_active_fvgs} = \@keep;
-}
-
-# -----------------------------------------------------------------------------
-# _detect_bos_choch: usa los swings ya confirmados por Liquidity.
-#   BOS  = ruptura (cierre de cuerpo) del ultimo swing en la MISMA direccion
-#          de la tendencia (continuacion).
-#   CHoCH= ruptura del ultimo swing OPUESTO (cambio de caracter / reversion).
-# Validez: se exige cierre del cuerpo mas alla del nivel (no solo mecha).
-# -----------------------------------------------------------------------------
-sub _detect_bos_choch {
-    my ( $self, $i ) = @_;
-    my $liq = $self->{liquidity};
-    return unless $liq;
-
-    my $cur = $self->{_c}[$i];
-
-    # Estructura "mayor": ultimo swing high/low confirmado. El indicador de
-    # liquidez los mantiene en O(1); por la confirmacion retrasada (k velas)
-    # su indice siempre es < i, por lo que nunca se usa informacion futura.
-    my $mh = $liq->last_swing_high;
-    my $ml = $liq->last_swing_low;
-
-    # Ruptura alcista: cierre por encima del swing high mayor aun no roto.
-    if ( $mh && $mh->{index} != $self->{_bh_idx} && $cur->{close} > $mh->{price} ) {
-        my $type = ( defined $self->{_bias} && $self->{_bias} eq 'bear' )
-            ? 'CHoCH' : 'BOS';
-        $self->_emit( $type, 'up', $i, $mh->{price}, $mh->{index} );
-        $self->{_bias}   = 'bull';
-        $self->{_bh_idx} = $mh->{index};
-    }
-
-    # Ruptura bajista: cierre por debajo del swing low mayor aun no roto.
-    if ( $ml && $ml->{index} != $self->{_bl_idx} && $cur->{close} < $ml->{price} ) {
-        my $type = ( defined $self->{_bias} && $self->{_bias} eq 'bull' )
-            ? 'CHoCH' : 'BOS';
-        $self->_emit( $type, 'down', $i, $ml->{price}, $ml->{index} );
-        $self->{_bias}   = 'bear';
-        $self->{_bl_idx} = $ml->{index};
-    }
-}
-
-sub _emit {
-    my ( $self, $type, $dir, $i, $price, $origin ) = @_;
-    push @{ $self->{_events} }, {
-        type      => $type,        # BOS | CHoCH
-        dir       => $dir,         # up | down
-        index     => $i,           # vela de ruptura (cierre mas alla del nivel)
-        origin    => $origin,      # indice del swing roto (inicio de la linea)
-        ts        => $self->{_c}[$i]{ts},
-        price     => $price,
-        label     => $type,
-        confirmed => 1,
-    };
-}
-
-# -----------------------------------------------------------------------------
-# _classify_swings: etiqueta cada swing confirmado como HH/HL/LH/LL
-# siguiendo la logica de Mxwll Price Action Suite.
-#
-#   Highs: comparar contra el ultimo swing H ya etiquetado.
-#     High actual > prev High  =>  HH (Higher High)
-#     High actual < prev High  =>  LH (Lower High)
-#
-#   Lows:  comparar contra el ultimo swing L ya etiquetado.
-#     Low actual  > prev Low   =>  HL (Higher Low)
-#     Low actual  < prev Low   =>  LL (Lower Low)
-#
-# El primer swing de cada tipo (sin referencia previa) se etiqueta HH o LL
-# segun su tipo (inicial, sin contexto aun). Solo procesa swings nuevos
-# (anti-duplicado por ID via _seen_swings).
-# -----------------------------------------------------------------------------
-sub _classify_swings {
-    my ($self) = @_;
     my $liq = $self->{liquidity};
     return unless $liq;
 
@@ -249,34 +177,101 @@ sub _classify_swings {
     return unless $swings && @$swings;
 
     for my $sw (@$swings) {
-        next if $self->{_seen_swings}{ $sw->{id} };
-        $self->{_seen_swings}{ $sw->{id} } = 1;
+        next if $sw->{index} >= $i;                       # aun no disponible cronologicamente
+        next if $self->{_seen_swing_id}{ $sw->{id} };      # ya incorporado
+        $self->{_seen_swing_id}{ $sw->{id} } = 1;
 
         if ( $sw->{kind} eq 'H' ) {
-            my $label;
-            if ( !defined $self->{_last_high} ) {
-                $label = 'HH';   # primer high: punto de referencia
-            } elsif ( $sw->{price} > $self->{_last_high}{price} ) {
-                $label = 'HH';
-            } else {
-                $label = 'LH';
+            if ( !defined $self->{_bos_high} ) {
+                $self->{_bos_high}       = $sw->{price};
+                $self->{_bos_high_index} = $sw->{index};
+                $self->{_principal_high_index} = $sw->{index};
             }
-            $self->{_swing_labels}{ $sw->{index} } = $label;
-            $self->{_last_high} = { index => $sw->{index}, price => $sw->{price} };
+            else {
+                $self->{_ibos_high}       = $sw->{price};
+                $self->{_ibos_high_index} = $sw->{index};
+            }
         }
         else {   # 'L'
-            my $label;
-            if ( !defined $self->{_last_low} ) {
-                $label = 'LL';   # primer low: punto de referencia
-            } elsif ( $sw->{price} > $self->{_last_low}{price} ) {
-                $label = 'HL';
-            } else {
-                $label = 'LL';
+            if ( !defined $self->{_bos_low} ) {
+                $self->{_bos_low}       = $sw->{price};
+                $self->{_bos_low_index} = $sw->{index};
+                $self->{_principal_low_index} = $sw->{index};
             }
-            $self->{_swing_labels}{ $sw->{index} } = $label;
-            $self->{_last_low} = { index => $sw->{index}, price => $sw->{price} };
+            else {
+                $self->{_ibos_low}       = $sw->{price};
+                $self->{_ibos_low_index} = $sw->{index};
+            }
         }
     }
+}
+
+# -----------------------------------------------------------------------------
+# _check_break: evalua ruptura alcista/bajista para 'bos' o 'ibos' segun
+# $break_mode ('close' exige cierre de cuerpo; 'wick' acepta mecha).
+# Emite a lo sumo un evento por vela y por scope (prioriza alcista).
+# -----------------------------------------------------------------------------
+sub _check_break {
+    my ( $self, $i, $c, $scope ) = @_;
+
+    my $high_key       = $scope eq 'bos' ? '_bos_high'       : '_ibos_high';
+    my $low_key        = $scope eq 'bos' ? '_bos_low'        : '_ibos_low';
+    my $high_index_key = $scope eq 'bos' ? '_bos_high_index' : '_ibos_high_index';
+    my $low_index_key  = $scope eq 'bos' ? '_bos_low_index'  : '_ibos_low_index';
+
+    my $up_break =
+        defined $self->{$high_key}
+        && ( ( $self->{break_mode} eq 'wick' ) ? $c->{high} : $c->{close} ) > $self->{$high_key};
+
+    if ($up_break) {
+        $self->_emit( $scope, 'up', $i, $self->{$high_key}, $self->{$high_index_key} );
+        $self->{$high_key}       = undef;
+        $self->{$high_index_key} = undef;
+        $self->_reset_ibos_on_bos() if $scope eq 'bos';
+        return;
+    }
+
+    my $down_break =
+        defined $self->{$low_key}
+        && ( ( $self->{break_mode} eq 'wick' ) ? $c->{low} : $c->{close} ) < $self->{$low_key};
+
+    if ($down_break) {
+        $self->_emit( $scope, 'down', $i, $self->{$low_key}, $self->{$low_index_key} );
+        $self->{$low_key}       = undef;
+        $self->{$low_index_key} = undef;
+        $self->_reset_ibos_on_bos() if $scope eq 'bos';
+        return;
+    }
+}
+
+# -----------------------------------------------------------------------------
+# _reset_ibos_on_bos: regla de reinicio (punto 5 de la especificacion). Al
+# confirmarse un BOS principal, toda subestructura iBOS activa deja de ser
+# valida: el proximo swing intermedio que aparezca reconstruye ibos desde
+# cero contra el nuevo nivel principal vigente.
+# -----------------------------------------------------------------------------
+sub _reset_ibos_on_bos {
+    my ($self) = @_;
+    $self->{_ibos_high}       = undef;
+    $self->{_ibos_low}        = undef;
+    $self->{_ibos_high_index} = undef;
+    $self->{_ibos_low_index}  = undef;
+}
+
+sub _emit {
+    my ( $self, $scope, $dir, $i, $price, $origin ) = @_;
+    my $label = ( $scope eq 'bos' ) ? 'BOS' : 'iBOS';
+    push @{ $self->{_events} }, {
+        type      => $scope eq 'bos' ? 'BOS' : 'iBOS',
+        scope     => $scope eq 'bos' ? 'external' : 'internal',
+        dir       => $dir,          # up | down
+        index     => $i,            # vela de ruptura
+        origin    => $origin,       # indice del swing roto (inicio de la linea)
+        ts        => $self->{_c}[$i]{ts},
+        price     => $price,
+        label     => $label,
+        confirmed => 1,
+    };
 }
 
 1;
