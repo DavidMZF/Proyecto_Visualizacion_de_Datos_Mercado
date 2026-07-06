@@ -216,11 +216,10 @@ sub _bucket_id_for {
     my $secs = $self->{resolution_minutes} * 60;
     return int( $c->{ts} / $secs );
 }
-
 # -----------------------------------------------------------------------------
 # _try_confirm_pivot: evalua fractalidad estilo ta.pivothigh/pivotlow sobre
-# la serie agregada ($self->{_agg}), en el indice (t = agg_len - 1 - period),
-# ahora que ya se conocen $period bloques cerrados a la derecha de t.
+# la serie agregada ($self->{_agg}).
+# CORRECCIÓN: Manejo de "Outside Bars" para evitar viajes en el tiempo (forma de Z).
 # -----------------------------------------------------------------------------
 sub _try_confirm_pivot {
     my ( $self, $last_agg_idx ) = @_;
@@ -242,8 +241,24 @@ sub _try_confirm_pivot {
                          && $agg->[$t]{low}  < $agg->[ $t + $i ]{low} );
     }
 
-    $self->_consolidate( $t, 'H', $agg->[$t]{high} ) if $is_high;
-    $self->_consolidate( $t, 'L', $agg->[$t]{low} )  if $is_low;
+    # --- NUEVA LÓGICA DE CONSOLIDACIÓN CRONOLÓGICA ---
+    if ($is_high && $is_low) {
+        # ¡Vela Envolvente! El bloque gigante rompió por arriba y por abajo.
+        # Ordenamos la inserción viendo qué índice base ocurrió primero.
+        if ($agg->[$t]{high_index} < $agg->[$t]{low_index}) {
+            # El techo se formó antes que el suelo
+            $self->_consolidate( $t, 'H', $agg->[$t]{high} );
+            $self->_consolidate( $t, 'L', $agg->[$t]{low} );
+        } else {
+            # El suelo se formó antes que el techo
+            $self->_consolidate( $t, 'L', $agg->[$t]{low} );
+            $self->_consolidate( $t, 'H', $agg->[$t]{high} );
+        }
+    } else {
+        # Flujo normal: solo uno de los dos, o ninguno, es verdadero
+        $self->_consolidate( $t, 'H', $agg->[$t]{high} ) if $is_high;
+        $self->_consolidate( $t, 'L', $agg->[$t]{low} )  if $is_low;
+    }
 }
 
 # -----------------------------------------------------------------------------
