@@ -3,20 +3,34 @@ package Market::Indicators::ZigZagVolumeProfile;
 use strict;
 use warnings;
 
+# =============================================================================
+# Market::Indicators::ZigZagVolumeProfile (ZZVP) - Refactorizado Fase 2
+# 
+# Motor de Dirección Externa Macro. Utiliza una Máquina de Estados Finita y 
+# una desviación porcentual para filtrar el ruido (micro-tendencias). Los
+# perfiles de volumen (POC) solo se calculan cuando se confirma el cierre 
+# de un segmento institucional, optimizando el rendimiento computacional.
+# =============================================================================
+
 sub new {
     my ( $class, %args ) = @_;
     my $self = {
-        period       => $args{period}       // 8,
-        bins         => $args{bins}         // 10,
-        max_profiles => $args{max_profiles} // 15,
+        # CAMBIO 1: Reemplazamos 'period' por 'deviation_pct'. 
+        # Un 0.5% a 1.0% asegura que solo capte movimientos macro.
+        deviation_pct => $args{deviation_pct} // 1.5, 
+        bins          => $args{bins}          // 10,
+        max_profiles  => $args{max_profiles}  // 15,
 
         _c => [],
-
         _pivots  => [],
         _next_id => 1,
-
         _segments => [],
         _profiles => [],
+
+        # CAMBIO 2: Variables para la Máquina de Estados Finita
+        _state         => 'INIT', # Estados: INIT, BUSCANDO_MAXIMO, BUSCANDO_MINIMO
+        _last_extreme  => undef,
+        _extreme_idx   => -1,
     };
     bless $self, $class;
     return $self;
@@ -26,11 +40,15 @@ sub get_values { return []; }
 
 sub reset {
     my ($self) = @_;
-    $self->{_c}      = [];
-    $self->{_pivots} = [];
-    $self->{_next_id} = 1;
-    $self->{_segments} = [];
+    $self->{_c}         = [];
+    $self->{_pivots}    = [];
+    $self->{_next_id}   = 1;
+    $self->{_segments}  = [];
     $self->{_profiles}  = [];
+    
+    $self->{_state}        = 'INIT';
+    $self->{_last_extreme} = undef;
+    $self->{_extreme_idx}  = -1;
 }
 
 sub update_at_index {
@@ -38,7 +56,7 @@ sub update_at_index {
     my $c = $md->get_candle($idx);
     return unless defined $c;
     $self->{_c}[$idx] = $c;
-    $self->_try_confirm_pivot($idx);
+    $self->_process_candle($idx);
 }
 
 sub update_last {
@@ -47,13 +65,16 @@ sub update_last {
     my $c   = $md->last_candle;
     return unless defined $c;
     $self->{_c}[$idx] = $c;
-    $self->_try_confirm_pivot($idx);
+    $self->_process_candle($idx);
 }
 
 sub get_pivots   { return $_[0]->{_pivots}; }
 sub get_segments { return $_[0]->{_segments}; }
 sub get_profiles { return $_[0]->{_profiles}; }
 
+# -----------------------------------------------------------------------------
+# Tramo provisional para el renderizado (sin cambios, funcional)
+# -----------------------------------------------------------------------------
 sub get_tentative_segment {
     my ($self) = @_;
     my $pivots = $self->{_pivots};
@@ -62,17 +83,8 @@ sub get_tentative_segment {
     my $last_pivot = $pivots->[-1];
     my $last_base_idx = $#{ $self->{_c} };
     return undef if $last_base_idx <= $last_pivot->{index};
-
+    
     my $c = $self->{_c};
-
-    # Extremo real alcanzado desde el ultimo pivote confirmado hasta la
-    # vela mas reciente conocida. El tramo tentativo debe apuntar hacia
-    # ese extremo (high si el ultimo pivote fue un minimo -> se busca
-    # hacia arriba; low si fue un maximo -> se busca hacia abajo), NO
-    # hacia el close de la ultima vela: el close puede quedar muy por
-    # detras del maximo/minimo real ya impreso en las velas, ocultando
-    # rebotes o caidas que ya ocurrieron dentro de la ventana no
-    # confirmada por el periodo del fractal.
     my $extreme_price = undef;
     my $extreme_idx   = $last_base_idx;
 
@@ -81,14 +93,11 @@ sub get_tentative_segment {
         next unless defined $candle;
 
         if ( $last_pivot->{kind} eq 'L' ) {
-            # buscando el proximo maximo -> nos interesa el 'high' mas alto
             if ( !defined($extreme_price) || $candle->{high} > $extreme_price ) {
                 $extreme_price = $candle->{high};
                 $extreme_idx   = $i;
             }
-        }
-        else {
-            # kind eq 'H' -> buscando el proximo minimo -> el 'low' mas bajo
+        } else {
             if ( !defined($extreme_price) || $candle->{low} < $extreme_price ) {
                 $extreme_price = $candle->{low};
                 $extreme_idx   = $i;
@@ -97,7 +106,6 @@ sub get_tentative_segment {
     }
 
     return undef unless defined $extreme_price;
-
     return {
         from_index => $last_pivot->{index},
         to_index   => $extreme_idx,
@@ -106,49 +114,118 @@ sub get_tentative_segment {
         dir        => ( $extreme_price > $last_pivot->{price} ) ? 'up' : 'down',
     };
 }
-
-sub _try_confirm_pivot {
+# -----------------------------------------------------------------------------
+# _process_candle: Máquina de Estados Finita con Validación "Outside Bar"
+# -----------------------------------------------------------------------------
+sub _process_candle {
     my ( $self, $idx ) = @_;
-    my $p = $self->{period};
-    my $t = $idx - $p;
-    return if $t < $p;
+    my $c = $self->{_c}[$idx];
 
-    my $c = $self->{_c};
-    for my $i ( 1 .. $p ) {
-        return unless defined $c->[ $t - $i ] && defined $c->[ $t + $i ];
+    # Inicialización
+    if ( $self->{_state} eq 'INIT' ) {
+        $self->{_state} = 'BUSCANDO_MAXIMO';
+        $self->{_last_extreme} = $c->{high};
+        $self->{_extreme_idx}  = $idx;
+        $self->_consolidate( $idx, 'L', $c->{low} ); 
+        return;
     }
 
-    my $is_high = 1;
-    my $is_low  = 1;
-    for my $i ( 1 .. $p ) {
-        $is_high = 0 if !( $c->[$t]{high} > $c->[ $t - $i ]{high}
-                         && $c->[$t]{high} > $c->[ $t + $i ]{high} );
-        $is_low  = 0 if !( $c->[$t]{low}  < $c->[ $t - $i ]{low}
-                         && $c->[$t]{low}  < $c->[ $t + $i ]{low} );
-    }
+    # EL CAMBIO 2: Uso de Desviación en lugar de Período (Filtro Macro)
+    my $dev = $self->{deviation_pct} / 100.0;
 
-    $self->_consolidate( $t, 'H', $c->[$t]{high} ) if $is_high;
-    $self->_consolidate( $t, 'L', $c->[$t]{low} )  if $is_low;
+    if ( $self->{_state} eq 'BUSCANDO_MAXIMO' ) {
+        my $made_new_high = ($c->{high} > $self->{_last_extreme});
+        my $triggered_reversal = 0;
+        
+        my $eval_high = $made_new_high ? $c->{high} : $self->{_last_extreme};
+        
+        # ¿El retroceso desde el punto más alto superó la desviación macro?
+        if ( ( $eval_high - $c->{low} ) / $eval_high >= $dev ) {
+            $triggered_reversal = 1;
+        }
+
+        # EL CAMBIO 1: Parche Cronológico para Outside Bars masivas
+        if ($made_new_high && $triggered_reversal) {
+            # La vela hizo un nuevo techo Y rompió la desviación a la baja al mismo tiempo.
+            if ($c->{open} > $c->{close}) {
+                # Vela Roja: Hizo el pico primero, luego se desplomó.
+                $self->_consolidate( $idx, 'H', $c->{high} );
+                $self->{_state} = 'BUSCANDO_MINIMO';
+                $self->{_last_extreme} = $c->{low};
+                $self->{_extreme_idx}  = $idx;
+            } else {
+                # Vela Verde: Cayó primero (falsa reversión), luego hizo el pico real al cerrar.
+                $self->{_last_extreme} = $c->{high};
+                $self->{_extreme_idx}  = $idx;
+            }
+        } 
+        # Flujo Normal: Solo continuación
+        elsif ($made_new_high) {
+            $self->{_last_extreme} = $c->{high};
+            $self->{_extreme_idx}  = $idx;
+        } 
+        # Flujo Normal: Solo reversión confirmada
+        elsif ($triggered_reversal) {
+            $self->_consolidate( $self->{_extreme_idx}, 'H', $self->{_last_extreme} );
+            $self->{_state} = 'BUSCANDO_MINIMO';
+            $self->{_last_extreme} = $c->{low};
+            $self->{_extreme_idx}  = $idx;
+        }
+    }
+    elsif ( $self->{_state} eq 'BUSCANDO_MINIMO' ) {
+        my $made_new_low = ($c->{low} < $self->{_last_extreme});
+        my $triggered_reversal = 0;
+
+        my $eval_low = $made_new_low ? $c->{low} : $self->{_last_extreme};
+
+        # ¿El rebote desde el punto más bajo superó la desviación macro?
+        if ( ( $c->{high} - $eval_low ) / $eval_low >= $dev ) {
+            $triggered_reversal = 1;
+        }
+
+        # EL CAMBIO 1: Parche Cronológico para Outside Bars masivas
+        if ($made_new_low && $triggered_reversal) {
+            if ($c->{open} < $c->{close}) {
+                # Vela Verde: Hizo el suelo primero, luego se disparó al alza.
+                $self->_consolidate( $idx, 'L', $c->{low} );
+                $self->{_state} = 'BUSCANDO_MAXIMO';
+                $self->{_last_extreme} = $c->{high};
+                $self->{_extreme_idx}  = $idx;
+            } else {
+                # Vela Roja: Subió primero (falsa reversión), luego se hundió al suelo real.
+                $self->{_last_extreme} = $c->{low};
+                $self->{_extreme_idx}  = $idx;
+            }
+        }
+        # Flujo Normal: Solo continuación
+        elsif ($made_new_low) {
+            $self->{_last_extreme} = $c->{low};
+            $self->{_extreme_idx}  = $idx;
+        }
+        # Flujo Normal: Solo reversión confirmada
+        elsif ($triggered_reversal) {
+            $self->_consolidate( $self->{_extreme_idx}, 'L', $self->{_last_extreme} );
+            $self->{_state} = 'BUSCANDO_MAXIMO';
+            $self->{_last_extreme} = $c->{high};
+            $self->{_extreme_idx}  = $idx;
+        }
+    }
 }
 
+# -----------------------------------------------------------------------------
+# _consolidate: Registra el segmento y calcula el Perfil de Volumen
+# CAMBIO 3: Eliminamos la destrucción en bucle (pop). Los cálculos pesados
+# ocurren una sola vez por cada vector macro cerrado.
+# -----------------------------------------------------------------------------
 sub _consolidate {
     my ( $self, $index, $kind, $price ) = @_;
+    my $pivots = $self->{_pivots};
+    my $last   = @$pivots ? $pivots->[-1] : undef;
+
+    # Prevención estructural: No podemos tener dos techos o dos suelos seguidos
+    return if defined $last && $last->{kind} eq $kind;
 
     my $pivot = { id => $self->{_next_id}++, index => $index, kind => $kind, price => $price };
-
-    my $pivots = $self->{_pivots};
-    my $last = @$pivots ? $pivots->[-1] : undef;
-
-    if ( defined $last && $last->{kind} eq $kind ) {
-        my $more_extreme =
-            ( $kind eq 'H' ) ? ( $price > $last->{price} ) : ( $price < $last->{price} );
-        return unless $more_extreme;
-        pop @$pivots;
-        pop @{ $self->{_segments} };
-        pop @{ $self->{_profiles} };
-        $last = @$pivots ? $pivots->[-1] : undef;
-    }
-
     push @$pivots, $pivot;
 
     if ( defined $last ) {
@@ -158,7 +235,6 @@ sub _consolidate {
 
 sub _add_segment_and_profile {
     my ( $self, $prev, $cur ) = @_;
-
     push @{ $self->{_segments} }, {
         from_index => $prev->{index},
         to_index   => $cur->{index},
@@ -167,20 +243,20 @@ sub _add_segment_and_profile {
         dir        => ( $cur->{price} > $prev->{price} ) ? 'up' : 'down',
     };
 
+    # Disparamos el cálculo del histograma y el POC
     push @{ $self->{_profiles} }, $self->_build_profile( $prev, $cur );
-
-    # Limitamos SOLO el historial de perfiles de volumen en memoria, 
-    # para no saturar el rendimiento, pero NUNCA borramos los _segments 
-    # estructurales del ZigZag.
+    
     my $max = $self->{max_profiles};
     if ( @{ $self->{_profiles} } > $max ) {
         shift @{ $self->{_profiles} };
     }
 }
 
+# -----------------------------------------------------------------------------
+# _build_profile: Escaneo de volumen por niveles de precio (Sin cambios en la math)
+# -----------------------------------------------------------------------------
 sub _build_profile {
     my ( $self, $prev, $cur ) = @_;
-
     my $idx_from = $prev->{index} < $cur->{index} ? $prev->{index} : $cur->{index};
     my $idx_to   = $prev->{index} < $cur->{index} ? $cur->{index}  : $prev->{index};
 
@@ -191,18 +267,18 @@ sub _build_profile {
     my $range  = $price_hi - $price_lo;
     $range = 1e-9 if $range <= 0;
     my $bin_size = $range / $n_bins;
-
+    
     my @bins = map {
         { low => $price_lo + $_ * $bin_size, high => $price_lo + ( $_ + 1 ) * $bin_size, volume => 0 }
     } ( 0 .. $n_bins - 1 );
-
+    
     my $c = $self->{_c};
     for my $i ( $idx_from .. $idx_to ) {
         my $candle = $c->[$i];
         next unless defined $candle;
         my $vol = $candle->{volume} // 0;
         next if $vol <= 0;
-
+        
         my $lo = $candle->{low}  < $price_lo ? $price_lo : $candle->{low};
         my $hi = $candle->{high} > $price_hi ? $price_hi : $candle->{high};
         next if $hi <= $lo;
@@ -214,7 +290,7 @@ sub _build_profile {
             my $overlap_lo = $lo > $b->{low}  ? $lo : $b->{low};
             my $overlap_hi = $hi < $b->{high} ? $hi : $b->{high};
             next if $overlap_hi <= $overlap_lo;
-
+            
             my $fraction = ( $overlap_hi - $overlap_lo ) / $candle_range;
             $b->{volume} += $vol * $fraction;
         }
