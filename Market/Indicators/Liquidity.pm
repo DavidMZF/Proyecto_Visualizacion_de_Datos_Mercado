@@ -3,14 +3,17 @@ package Market::Indicators::Liquidity;
 # =============================================================================
 # Market::Indicators::Liquidity
 #
-# Deteccion y filtrado de Puntos de Giro (Swings) y clasificacion de
-# Estructura de Mercado (HH / HL / LH / LL), mas la Linea de Tendencia
+# Deteccion y filtrado de Puntos de Giro (Swings), mas la Linea de Tendencia
 # construida a partir de la secuencia combinada de swings (highs y lows
 # intercalados, sin distincion de tipo para trazar la polilinea).
 #
+# NOTA: la clasificacion de estructura HH/HL/LH/LL fue removida de este
+# modulo. Esa logica ahora vive, mejorada, en Indicators::SMC_Structures
+# (consume los pivotes de ZigZagMTF). Este modulo solo entrega swings
+# crudos filtrados por ATR + desplazamiento; no clasifica ni etiqueta.
+#
 # No incluye Order Blocks, FVG ni logica de dibujo: esto es SOLO calculo.
-# El overlay (Overlays/Liquidity.pm) lee get_swings / get_swing_labels /
-# get_trendline y dibuja.
+# El overlay (Overlays/Liquidity.pm) lee get_swings / get_trendline y dibuja.
 #
 # -----------------------------------------------------------------------------
 # PIPELINE (por cada swing base candidato):
@@ -49,13 +52,7 @@ package Market::Indicators::Liquidity;
 #        Solo cuando el nuevo swing es de tipo OPUESTO al ultimo consolidado
 #        se agrega como swing nuevo en la secuencia.
 #
-#   5. CLASIFICACION (solo swings que sobreviven 1, 2 y 3)
-#        Highs: nuevo Max > Max consolidado anterior -> HH; si no -> LH.
-#        Lows : nuevo Min >= Min consolidado anterior -> HL; si no -> LL.
-#        El primer swing de cada tipo (sin referencia previa) se marca
-#        como HH o LL respectivamente (punto de partida, sin contexto).
-#
-#   6. TREND LINE
+#   5. TREND LINE
 #        Polilinea construida con TODOS los swings consolidados (highs y
 #        lows intercalados por indice/tiempo, sin distinguir tipo), en
 #        el orden en que fueron confirmados.
@@ -74,10 +71,9 @@ sub new {
         v_desp        => $args{v_desp}    // 10,   # ventana max. de velas para el impulso
         u_desp        => $args{u_desp}    // 2.0,  # multiplicador ATR de recorrido minimo
 
-        eq_factor     => $args{eq_factor}    // 0.10, 
-        grab_window   => $args{grab_window}  // 3,     
-        acceptance_n  => $args{acceptance_n} // 10,    
-
+        eq_factor     => $args{eq_factor}    // 0.10,
+        grab_window   => $args{grab_window}  // 3,
+        acceptance_n  => $args{acceptance_n} // 10,
 
         _c   => [],   # velas conocidas (indice = indice de vela global)
         _atr => [],   # cache local de get_values() del ATR, se refresca cada update
@@ -100,9 +96,6 @@ sub new {
         _last_H => undef,   # { index, price }
         _last_L => undef,
 
-        # Etiquetas de estructura por indice de swing: 'HH'|'HL'|'LH'|'LL'
-        _labels => {},
-
         # Linea de tendencia: puntos [{index, price}], un punto por swing
         # consolidado, en orden cronologico (highs y lows intercalados).
         _trendline => [],
@@ -114,7 +107,7 @@ sub new {
         _levels => [],
         _equals => [],
         _events => [],
-        _open_level_refs => [], 
+        _open_level_refs => [],
     };
     bless $self, $class;
     return $self;
@@ -130,7 +123,6 @@ sub reset {
     $self->{_next_id} = 1;
     $self->{_last_H} = undef;
     $self->{_last_L} = undef;
-    $self->{_labels} = {};
     $self->{_trendline} = [];
     $self->{_levels} = [];
     $self->{_equals} = [];
@@ -144,7 +136,6 @@ sub get_values { return []; }
 # Accesores de solo lectura para overlays / SMC_Structures.
 # -----------------------------------------------------------------------------
 sub get_swings       { return $_[0]->{_swings}; }
-sub get_swing_labels { return $_[0]->{_labels}; }
 sub get_trendline    { return $_[0]->{_trendline}; }
 sub get_levels       { return $_[0]->{_levels}; }
 sub get_equals       { return $_[0]->{_equals}; }
@@ -209,7 +200,7 @@ sub _ingest {
 
     $self->_try_confirm_fractals($idx);
     $self->_check_displacement( $idx, $md );
-    $self->_check_displacement($idx);
+    $self->_update_state_machine( $md, $idx );
 }
 
 # -----------------------------------------------------------------------------
@@ -382,8 +373,6 @@ sub _consolidate {
 
     splice( @{ $self->{_swings} }, $pos, 0, $swing );
 
-    $self->_classify($swing);
-
     $self->_insert_sorted_by_index( $self->{_trendline}, { index => $swing->{index}, price => $swing->{price} } );
 
     $self->_refresh_last_refs();
@@ -407,7 +396,7 @@ sub _find_insert_pos {
 }
 
 # -----------------------------------------------------------------------------
-# _remove_swing: retira un swing de _swings, _trendline y _labels por id.
+# _remove_swing: retira un swing de _swings y _trendline por id.
 # Usado cuando un swing del mismo tipo mas extremo lo reemplaza.
 # -----------------------------------------------------------------------------
 sub _remove_swing {
@@ -428,8 +417,6 @@ sub _remove_swing {
             last;
         }
     }
-
-    delete $self->{_labels}{ $swing->{index} };
 
     for my $i ( reverse 0 .. $#{ $self->{_levels} } ) {
         my $lv = $self->{_levels}[$i];
@@ -473,60 +460,6 @@ sub _refresh_last_refs {
             $self->{_last_L} = { index => $s->{index}, price => $s->{price} };
         }
         last if defined $self->{_last_H} && defined $self->{_last_L};
-    }
-}
-
-# -----------------------------------------------------------------------------
-# _classify: HH/LH para maximos, HL/LL para minimos, comparando SIEMPRE contra
-# el swing consolidado INMEDIATAMENTE ANTERIOR del MISMO tipo por indice
-# (no por orden de confirmacion). Como _swings esta siempre ordenado por
-# index, se busca el predecesor real recorriendo hacia atras desde la
-# posicion de insercion.
-#
-# Tambien reclasifica el swing SIGUIENTE del mismo tipo si existe, porque al
-# insertar este swing en medio de la secuencia (confirmacion fuera de orden),
-# ese siguiente pudo haber sido clasificado contra un predecesor equivocado.
-# -----------------------------------------------------------------------------
-sub _classify {
-    my ( $self, $swing ) = @_;
-
-    my $swings = $self->{_swings};
-    my $pos = -1;
-    for my $i ( 0 .. $#$swings ) {
-        if ( $swings->[$i]{id} == $swing->{id} ) { $pos = $i; last; }
-    }
-    return if $pos < 0;
-
-    my $prev = $self->_find_neighbor_same_kind( $pos, -1, $swing->{kind} );
-    $self->{_labels}{ $swing->{index} } = $self->_label_for( $swing, $prev );
-
-    my $next = $self->_find_neighbor_same_kind( $pos, 1, $swing->{kind} );
-    if ($next) {
-        $self->{_labels}{ $next->{index} } = $self->_label_for( $next, $swing );
-    }
-}
-
-sub _find_neighbor_same_kind {
-    my ( $self, $pos, $step, $kind ) = @_;
-    my $swings = $self->{_swings};
-    my $i = $pos + $step;
-    while ( $i >= 0 && $i <= $#$swings ) {
-        return $swings->[$i] if $swings->[$i]{kind} eq $kind;
-        $i += $step;
-    }
-    return undef;
-}
-
-sub _label_for {
-    my ( $self, $swing, $prev ) = @_;
-
-    if ( $swing->{kind} eq 'H' ) {
-        return 'HH' if !defined $prev;
-        return $swing->{price} > $prev->{price} ? 'HH' : 'LH';
-    }
-    else {
-        return 'LL' if !defined $prev;
-        return $swing->{price} >= $prev->{price} ? 'HL' : 'LL';
     }
 }
 

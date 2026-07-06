@@ -147,14 +147,19 @@ my $liq_ind = Market::Indicators::Liquidity->new(
     v_desp     => 10,    # ventana max. de velas para validar desplazamiento
     u_desp     => 2.0,   # multiplicador ATR de recorrido minimo (filtro 2)
 );
-my $smc_ind = Market::Indicators::SMC_Structures->new(
-    liquidity => $liq_ind, break_mode => 'close' );
 
 # ZigZag Multi Time Frame (direccion INTERNA): remuestrea a 30min por
 # defecto y corre un zigzag clasico por periodo, independiente de ATR.
 my $zzmtf_ind = Market::Indicators::ZigZagMTF->new(
     resolution_minutes => 30,   # 15 | 30 | 60
     period             => 2,    # ZigZag Period (estilo ZZMTF)
+);
+
+# 2. PASO CRÍTICO: Inyectamos la referencia del ZigZag al crear SMC_Structures
+my $smc_ind = Market::Indicators::SMC_Structures->new(
+    liquidity  => $liq_ind, 
+    zzmtf      => $zzmtf_ind,   # <-- ESTA LÍNEA CONECTA EL MOTOR ANALÍTICO
+    break_mode => 'close' 
 );
 
 # ZigZag Volume Profile (direccion EXTERNA): zigzag de mayor grado sobre la
@@ -167,8 +172,8 @@ my $zzvp_ind = Market::Indicators::ZigZagVolumeProfile->new(
 
 $ind_manager->register('atr',       $atr_ind);
 $ind_manager->register('liquidity', $liq_ind);
-$ind_manager->register('smc',       $smc_ind);
-$ind_manager->register('zzmtf',     $zzmtf_ind);
+$ind_manager->register('zzmtf',     $zzmtf_ind); # <-- Sube a 3er lugar
+$ind_manager->register('smc',       $smc_ind);   # <-- Baja a 4to lugar
 $ind_manager->register('zzvp',      $zzvp_ind);
 
 print "Calculando indicadores (ATR, Liquidity, SMC, ZigZag MTF/VP)...\n";
@@ -610,16 +615,20 @@ my $make_chk = sub {
 # =============================================================================
 # Columna SMC STRUCTURES (BOS / iBOS)
 # =============================================================================
-my %SMC = ( show_bos => 0, show_ibos => 0 );
+my %SMC = (
+    show_bos  => 0,
+    show_ibos => 0,
+    show_hhll => 0,
+);
 my $smc_master = 0;
 my $refresh_smc = sub {
     $smc_overlay->set_flag($_, $SMC{$_}) for keys %SMC;
-    my $any = ( $SMC{show_bos} || $SMC{show_ibos} ) ? 1 : 0;
+    my $any = ( $SMC{show_bos} || $SMC{show_ibos} || $SMC{show_hhll} ) ? 1 : 0;
     $overlay_mgr->set_visible('smc', $any);
     $engine->request_render;
 };
 my $sync_smc_master = sub {
-    $smc_master = ( $SMC{show_bos} && $SMC{show_ibos} ) ? 1 : 0;
+    $smc_master = ( $SMC{show_bos} && $SMC{show_ibos} && $SMC{show_hhll} ) ? 1 : 0;
 };
 my $leaf_smc = sub { $refresh_smc->(); $sync_smc_master->(); };
 
@@ -630,6 +639,7 @@ $make_chk->($col_smc, 'Activar SMC', \$smc_master, sub {
 });
 $make_chk->($col_smc, 'BOS',  \$SMC{show_bos},  $leaf_smc);
 $make_chk->($col_smc, 'iBOS', \$SMC{show_ibos}, $leaf_smc);
+$make_chk->($col_smc, 'HH/HL/LH/LL', \$SMC{show_hhll}, $leaf_smc);
 
 $tools_bar->Frame(-background => '#2a3445', -width => 1, -height => 16)
     ->pack(-side => 'left', -pady => 4, -padx => 4);
@@ -683,7 +693,7 @@ $tools_bar->Frame(-background => '#2a3445', -width => 1, -height => 16)
 # Columna LIQUIDITY (Swing / BSL / SSL / EQH / EQL / Sweeps / Grabs / Runs)
 # =============================================================================
 my %LIQ = (
-    show_swing => 0, show_hhll => 0, show_trendline => 0,
+    show_swing => 0, show_trendline => 0,
     show_bsl => 0, show_ssl => 0, show_eqh => 0,
     show_eql => 0, show_sweeps => 0, show_grabs => 0, show_runs => 0,
 );
@@ -706,7 +716,6 @@ $make_chk->($col_liq, 'Activar Liquidity', \$liq_master, sub {
     $refresh_liq->();
 });
 $make_chk->($col_liq, 'Swing Points',  \$LIQ{show_swing},  $leaf_liq);
-$make_chk->($col_liq, 'HH/HL/LH/LL',   \$LIQ{show_hhll},   $leaf_liq);
 $make_chk->($col_liq, 'Trend Line',    \$LIQ{show_trendline}, $leaf_liq);
 $make_chk->($col_liq, 'BSL - Buy Side',  \$LIQ{show_bsl},  $leaf_liq);
 $make_chk->($col_liq, 'SSL - Sell Side', \$LIQ{show_ssl},  $leaf_liq);

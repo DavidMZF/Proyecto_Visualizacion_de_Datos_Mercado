@@ -50,9 +50,8 @@ sub set_flag {
     my ( $self, $flag, $val ) = @_;
     $self->{$flag} = $val ? 1 : 0;
 }
-
 # -----------------------------------------------------------------------------
-# render: se auto-limpia con su tag y dibuja solo lo visible.
+# render (Modificado con interruptor de bandera)
 # -----------------------------------------------------------------------------
 sub render {
     my ( $self, $canvas, $scale ) = @_;
@@ -62,8 +61,57 @@ sub render {
     return unless $src->can('get_events');
 
     my @placed;   # cajas [x1,y1,x2,y2] de etiquetas ya colocadas (anti-solape)
+    
+    # 1. Dibujar BOS y CHoCH
     $self->_render_events( $canvas, $scale, $src, \@placed )
         if $self->{show_bos} || $self->{show_ibos};
+
+    # 2. CORRECCIÓN: Dibujar SOLO si el flag de la interfaz está encendido
+    $self->_render_swing_labels( $canvas, $scale, $src, \@placed )
+        if $self->{show_hhll}; # <── Agrega este interruptor aquí
+}
+# -----------------------------------------------------------------------------
+# _render_swing_labels: Dibuja los chips HH, HL, LH, LL exclusivamente 
+# en los picos confirmados por el ZigZagMTF, aplicando Frustum Culling.
+# -----------------------------------------------------------------------------
+sub _render_swing_labels {
+    my ( $self, $canvas, $scale, $src, $placed ) = @_;
+    
+    return unless $src->can('get_swing_labels');
+    my $labels = $src->get_swing_labels();
+    return unless $labels && %$labels;
+
+    my $off    = $scale->{offset};
+    my $vb     = $scale->{visible_bars};
+    my $plot_w = $scale->_plot_w;
+
+    for my $idx ( keys %$labels ) {
+        # FRUSTUM CULLING: Ignorar etiquetas que están fuera de la pantalla actual
+        next if $idx < $off || $idx > $off + $vb;
+        
+        my $data = $labels->{$idx};
+        next unless ref $data eq 'HASH'; # Validar que tenga el nuevo formato con precio
+
+        my $x = $scale->index_to_center_x($idx);
+        
+        # Doble verificación para evitar dibujar fuera de los bordes del canvas
+        next if $x < 0 || $x > $plot_w;
+
+        my $y = $scale->value_to_y( $data->{price} );
+        
+        # Determinar el color y posición: Techos (H) arriba, Suelos (L) abajo
+        my $is_high = ($data->{kind} eq 'H');
+        my $color   = $is_high ? '#ff4a68' : '#00ffaa'; # Rojo para altos, Verde para bajos
+        my $place   = $is_high ? 'above'   : 'below';
+
+        # Aprovechamos el helper _chip que ya tiene tu código
+        $self->_chip( $canvas, $x, $y, $data->{label},
+            -color  => $color,
+            -style  => 'solid',
+            -place  => $place,
+            -placed => $placed 
+        );
+    }
 }
 
 # -----------------------------------------------------------------------------

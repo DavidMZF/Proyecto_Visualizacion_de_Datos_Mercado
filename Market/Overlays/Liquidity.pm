@@ -35,7 +35,7 @@ use constant {
     C_EQ     => '#7e57c2',   # violeta (EQH/EQL, configurable)
     C_GRAB   => '#ff9800',   # naranja (Liquidity Grab)
     C_RUN    => '#4f8cff',   # azul    (Liquidity Run)
-    C_TREND  => '#d6dbe6',   # gris claro (trend line)
+    C_TREND  => '#000000',   # gris claro (trend line)
     C_HH     => '#26a69a',   # Higher High  (verde, continuacion alcista)
     C_HL     => '#80cbc4',   # Higher Low   (verde claro)
     C_LH     => '#ef9a9a',   # Lower High   (rojo claro)
