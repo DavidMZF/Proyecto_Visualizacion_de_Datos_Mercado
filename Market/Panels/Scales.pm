@@ -148,14 +148,14 @@ sub _draw_y_scale {
 
     $canvas->createRectangle(
         $x_sep, 0, $x_end, $self->{canvas_h},
-        -fill    => '#111722',
-        -outline => '#111722',
+        -fill    => '#e8eaed',
+        -outline => '#e8eaed',
         -tags    => ['scale_bg'],
     );
 
     $canvas->createLine(
         $x_sep, 0, $x_sep, $self->{canvas_h},
-        -fill  => '#2a3445',
+        -fill  => '#c7cbd1',
         -width => 1,
         -tags  => ['scale_border'],
     );
@@ -164,17 +164,12 @@ sub _draw_y_scale {
     while ( $level <= $self->{max_val} + 1e-9 ) {
         my $y = $self->value_to_y($level);
 
-        $canvas->createLine(
-            0, $y, $x_sep, $y,
-            -fill  => '#222b3a',
-            -width => 1,
-            -tags  => ['scale_grid'],
-        );
+        # Lineas horizontales de grid removidas a pedido (fondo limpio).
 
         $canvas->createText(
             $x_sep + ( $x_end - $x_sep ) / 2, $y,
             -text   => sprintf( $fmt, $level ),
-            -fill   => '#d6dbe6',
+            -fill   => '#1a1f29',
             -anchor => 'center',
             -font   => 'TkFixedFont 8',
             -tags   => ['scale_label'],

@@ -67,7 +67,7 @@ my $CANVAS_W      = $WIN_W;
 # =============================================================================
 # LAYOUT
 # =============================================================================
-my $tf_frame = $mw->Frame(-background => '#151a24', -height => $TF_BAR_H)
+my $tf_frame = $mw->Frame(-background => '#ffffff', -height => $TF_BAR_H)
     ->pack(-fill => 'x', -side => 'top');
 
 my $canvas_price = $mw->Canvas(
@@ -274,10 +274,10 @@ $replay = Market::Replay->new(
 # TOOLBAR — se crea ANTES de registrar callbacks para que los botones existan
 # =============================================================================
 my %bs = (
-    -background       => '#151a24',
-    -foreground       => '#d6dbe6',
-    -activebackground => '#222b3a',
-    -activeforeground => '#ffffff',
+    -background       => '#ffffff',
+    -foreground       => '#1a1f29',
+    -activebackground => '#e0e4ea',
+    -activeforeground => '#000000',
     -relief           => 'flat',
     -bd               => 0,
     -font             => 'TkDefaultFont 9',
@@ -285,7 +285,7 @@ my %bs = (
     -pady             => 3,
 );
 
-my $toolbar_left = $tf_frame->Frame(-background => '#151a24')
+my $toolbar_left = $tf_frame->Frame(-background => '#ffffff')
     ->pack(-side => 'left', -fill => 'x');
 
 # --- Boton modo precio ---
@@ -357,7 +357,7 @@ for my $tf (qw(1m 5m 15m 1h 2h 4h D W)) {
             $tf_lbl->configure(-text => $tf);
             for my $k (keys %tf_btns) {
                 $tf_btns{$k}->configure(
-                    -foreground => ($k eq $tf ? '#4f8cff' : '#d6dbe6')
+                    -foreground => ($k eq $tf ? '#4f8cff' : '#1a1f29')
                 );
             }
             $engine->set_timeframe($tf);
@@ -406,7 +406,7 @@ $btn_replay_start = $toolbar_left->Button(%bs,
 $engine->set_replay_click_cb(sub {
     my ($ts) = @_;
     $replay_selected_ts = $ts;
-    $btn_replay_start->configure(-foreground => '#d6dbe6');
+    $btn_replay_start->configure(-foreground => '#1a1f29');
     my $fecha = Time::Moment->from_epoch($ts)
         ->with_offset_same_instant(-300)
         ->strftime('%Y-%m-%d %H:%M');
@@ -469,10 +469,30 @@ $btn_replay_exit = $toolbar_left->Button(%bs,
 
 $replay_status_lbl = $toolbar_left->Label(%bs,
     -text       => 'EN VIVO (replay inactivo)',
-    -foreground => '#d6dbe6',
+    -foreground => '#1a1f29',
     -font       => 'TkDefaultFont 9 bold',
 );
 # No se hace pack: el label existe pero no se muestra
+
+# =============================================================================
+# BOTON: OPACIDAD DE VELAS (a la derecha del bloque de Replay)
+# Atenua visualmente el cuerpo de las velas para que las lineas de
+# tendencia / overlays por debajo se aprecien mejor.
+# =============================================================================
+$toolbar_left->Frame(-background => '#2a3445', -width => 1, -height => 16)
+    ->pack(-side => 'left', -pady => 5, -padx => 6);
+
+my $btn_candle_opacity;
+$btn_candle_opacity = $toolbar_left->Button(%bs,
+    -text    => 'Velas: Opacas',
+    -command => sub {
+        my $opaque = $engine->{price_panel}->toggle_candle_opacity;
+        $btn_candle_opacity->configure(
+            -text => $opaque ? 'Velas: Opacas' : 'Velas: Atenuadas',
+        );
+        $engine->render;
+    },
+)->pack(-side => 'left', -padx => 4, -pady => 2);
 
 # =============================================================================
 # DRAG DEL SEPARADOR ATR
@@ -524,14 +544,14 @@ $replay_status_lbl = $toolbar_left->Label(%bs,
 # sus sub-opciones activa). El menu SOLO administra estados y dispara render;
 # no calcula ni dibuja directamente.
 # =============================================================================
-my $BAR_BG   = '#111722';
-my $PANEL_BG = '#151a24';
+my $BAR_BG   = '#ffffff';
+my $PANEL_BG = '#ffffff';
 
 my %BBS = (
     -background       => $BAR_BG,
-    -activebackground => '#222b3a',
-    -activeforeground => '#ffffff',
-    -foreground       => '#d6dbe6',
+    -activebackground => '#e0e4ea',
+    -activeforeground => '#000000',
+    -foreground       => '#1a1f29',
     -relief           => 'flat',
     -bd               => 0,
     -font             => 'TkDefaultFont 9',
@@ -540,8 +560,27 @@ my %BBS = (
 );
 
 # --- Fila "Herramientas:" con el toggle del panel ---
-my $tools_bar = $mw->Frame(-background => $BAR_BG);
-$tools_bar->pack(-side => 'top', -fill => 'x', -before => $canvas_price);
+my $tools_outer = $mw->Frame(-background => $BAR_BG);
+$tools_outer->pack(-side => 'top', -fill => 'x', -before => $canvas_price);
+
+my $tools_canvas = $tools_outer->Canvas(
+    -background => $BAR_BG, -highlightthickness => 0,
+)->pack(-side => 'top', -fill => 'x', -expand => 1);
+
+my $tools_hscroll = $tools_outer->Scrollbar(
+    -orient => 'horizontal', -command => ['xview', $tools_canvas],
+)->pack(-side => 'top', -fill => 'x');
+$tools_canvas->configure(-xscrollcommand => ['set', $tools_hscroll]);
+
+my $tools_bar = $tools_canvas->Frame(-background => $BAR_BG);
+$tools_canvas->createWindow(0, 0, -anchor => 'nw', -window => $tools_bar);
+
+$tools_bar->bind('<Configure>', sub {
+    $tools_canvas->configure(
+        -scrollregion => [ $tools_canvas->bbox('all') ],
+        -height       => $tools_bar->reqheight,
+    );
+});
 
 
 # --- Helpers de construccion del menu ---
@@ -558,7 +597,7 @@ my $make_chk = sub {
     my $cb = $parent->Checkbutton(
         -text => $text, -variable => $varref, -onvalue => 1, -offvalue => 0,
         -background => $BAR_BG, -activebackground => $BAR_BG,
-        -foreground => '#d6dbe6', -activeforeground => '#ffffff',
+        -foreground => '#1a1f29', -activeforeground => '#000000',
         -selectcolor => '#4f8cff',
         -font => 'TkDefaultFont 8', -anchor => 'w',
         ( $cmd ? ( -command => $cmd ) : () ),

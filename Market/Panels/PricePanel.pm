@@ -13,8 +13,8 @@ use constant {
     COLOR_FG       => '#d6dbe6',
     COLOR_GRID     => '#222b3a',
     COLOR_LAST_BG  => '#ff0000',
-    COLOR_INFO     => '#d6dbe6',
-    BG_COLOR       => '#0f131a',
+    COLOR_INFO     => '#1a1f29',
+    BG_COLOR       => '#e8eaed',
     MIN_BODY_H     => 1,
 };
 
@@ -32,6 +32,7 @@ sub new {
         _time_label_bg => undef,
         _time_label    => undef,
         _cross_ready => 0,
+        candle_opacity => 1,   # 1 = opaco normal, 0 = velas atenuadas (ver trend lines)
     };
     bless $self, $class;
     return $self;
@@ -77,6 +78,28 @@ sub round {
 sub set_scale {
     my ( $self, $scale ) = @_;
     $self->{scale} = $scale;
+}
+
+# -----------------------------------------------------------------------------
+# set_candle_opacity / toggle_candle_opacity
+# Permite atenuar visualmente las velas (usando -stipple de Tk, que es la
+# forma de simular transparencia en Canvas) para que las lineas de
+# tendencia / overlays que quedan por debajo se aprecien mejor.
+# -----------------------------------------------------------------------------
+sub set_candle_opacity {
+    my ( $self, $opaque ) = @_;
+    $self->{candle_opacity} = $opaque ? 1 : 0;
+}
+
+sub toggle_candle_opacity {
+    my ($self) = @_;
+    $self->{candle_opacity} = $self->{candle_opacity} ? 0 : 1;
+    return $self->{candle_opacity};
+}
+
+sub is_candle_opaque {
+    my ($self) = @_;
+    return $self->{candle_opacity} ? 1 : 0;
 }
 
 sub get_y_range {
@@ -149,23 +172,30 @@ sub render {
         my $body_h = $y_bot - $y_top;
         $body_h = MIN_BODY_H if $body_h < MIN_BODY_H;
 
+        my @stipple_opt = $self->{candle_opacity} ? () : ( -stipple => 'gray50' );
+        my @outline_stipple_opt = $self->{candle_opacity} ? () : ( -outlinestipple => 'gray50' );
+
         $canvas->createRectangle(
             $cx - $body_w / 2, $y_top,
             $cx + $body_w / 2, $y_top + $body_h,
             -fill    => $color,
             -outline => $border,
+            @stipple_opt,
+            @outline_stipple_opt,
             -tags    => ['candle'],
         );
 
         $canvas->createLine(
             $cx, $y_high, $cx, $y_top,
             -fill => $color,
+            @stipple_opt,
             -tags => ['candle']
         );
 
         $canvas->createLine(
             $cx, $y_top + $body_h, $cx, $y_low,
             -fill => $color,
+            @stipple_opt,
             -tags => ['candle']
         );
     }
@@ -185,14 +215,6 @@ sub render_last_visible_price {
     my $y     = $scale->value_to_y($last_close);
     my $x_sep = $scale->_plot_w;
     my $x_end = $scale->{canvas_w};
-
-    $canvas->createLine(
-        0, $y, $x_sep, $y,
-        -fill  => COLOR_LAST_BG,
-        -dash  => [ 3, 3 ],
-        -width => 1,
-        -tags  => ['last_price']
-    );
 
     $canvas->createRectangle(
         $x_sep + 1, $y - 9, $x_end - 1, $y + 9,
@@ -393,7 +415,7 @@ sub draw_time_axis {
 
     $canvas->createLine(
         0, $y_sep, $scale->_plot_w, $y_sep,
-        -fill => '#2a3445',
+        -fill => '#c7cbd1',
         -tags => ['time_axis']
     );
 
@@ -414,7 +436,7 @@ sub draw_time_axis {
 
         $canvas->createLine(
             $x, $y_sep, $x, $y_sep + 4,
-            -fill => '#2a3445',
+            -fill => '#c7cbd1',
             -tags => ['time_axis']
         );
 
@@ -422,7 +444,7 @@ sub draw_time_axis {
         $canvas->createText(
             $x, $y_text + 4,
             -text   => $anchor->{label},
-            -fill   => '#8b95a7',
+            -fill   => '#4a5160',
             -font   => $font,
             -anchor => 'n',
             -tags   => ['time_axis']

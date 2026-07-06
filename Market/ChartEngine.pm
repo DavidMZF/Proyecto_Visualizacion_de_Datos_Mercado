@@ -1287,7 +1287,7 @@ sub compute_intraday_labels {
     my $step_min = $nice[-1];
     for my $s (@nice) {
         next if $s < $bar_min;
-        if ( $visible / ( $s / $bar_min ) <= 12 ) { $step_min = $s; last; }
+        if ( $visible / ( $s / $bar_min ) <= 24 ) { $step_min = $s; last; }
     }
 
     my $min_gap = int( $step_min / $bar_min / 2 );

@@ -7,7 +7,7 @@ use constant {
     COLOR_ATR      => '#2189ff',
     COLOR_ATR_LAST => '#0004ff',
     COLOR_CROSS    => '#8b95a7',
-    BG_COLOR       => '#0f131a',
+    BG_COLOR       => '#e8eaed',
 };
 
 sub new {
@@ -158,8 +158,6 @@ sub render_last_visible_value {
     my $x_sep = $scale->_plot_w;
     my $x_end = $scale->{canvas_w};
 
-    $canvas->createLine(0, $y, $x_sep, $y,
-        -fill => COLOR_ATR_LAST, -dash => [3,3], -width => 1, -tags => ['atr_all']);
     $canvas->createRectangle($x_sep+1, $y-9, $x_end-1, $y+9,
         -fill => COLOR_ATR_LAST, -outline => COLOR_ATR_LAST, -tags => ['atr_all']);
     $canvas->createText($x_sep + ($x_end-$x_sep)/2, $y,

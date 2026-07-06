@@ -74,6 +74,11 @@ sub new {
         v_desp        => $args{v_desp}    // 10,   # ventana max. de velas para el impulso
         u_desp        => $args{u_desp}    // 2.0,  # multiplicador ATR de recorrido minimo
 
+        eq_factor     => $args{eq_factor}    // 0.10, 
+        grab_window   => $args{grab_window}  // 3,     
+        acceptance_n  => $args{acceptance_n} // 10,    
+
+
         _c   => [],   # velas conocidas (indice = indice de vela global)
         _atr => [],   # cache local de get_values() del ATR, se refresca cada update
 
@@ -109,6 +114,7 @@ sub new {
         _levels => [],
         _equals => [],
         _events => [],
+        _open_level_refs => [], 
     };
     bless $self, $class;
     return $self;
@@ -129,6 +135,7 @@ sub reset {
     $self->{_levels} = [];
     $self->{_equals} = [];
     $self->{_events} = [];
+    $self->{_open_level_refs} = [];
 }
 
 sub get_values { return []; }
@@ -142,6 +149,17 @@ sub get_trendline    { return $_[0]->{_trendline}; }
 sub get_levels       { return $_[0]->{_levels}; }
 sub get_equals       { return $_[0]->{_equals}; }
 sub get_events       { return $_[0]->{_events}; }
+
+sub side_label {
+    my ( $self, $side ) = @_;
+    return $side eq 'buy' ? 'BSL' : 'SSL';
+}
+
+sub is_internal {
+    my ( $self, $level, $current_tf ) = @_;
+    return 1 unless defined $level->{origin_tf};
+    return $level->{origin_tf} eq $current_tf ? 1 : 0;
+}
 
 sub last_swing_high {
     my ($self) = @_;
@@ -190,6 +208,7 @@ sub _ingest {
     $self->{_atr} = $atr_arr if $atr_arr;
 
     $self->_try_confirm_fractals($idx);
+    $self->_check_displacement( $idx, $md );
     $self->_check_displacement($idx);
 }
 
@@ -274,7 +293,7 @@ sub _apply_atr_filter {
 # sin lograrlo, se descarta.
 # -----------------------------------------------------------------------------
 sub _check_displacement {
-    my ( $self, $idx ) = @_;
+    my ( $self, $idx, $market_data ) = @_;
     return unless @{ $self->{_pending_displacement} };
 
     my $c   = $self->{_c}[$idx];
@@ -290,7 +309,7 @@ sub _check_displacement {
             $cand->{extreme} = $c->{low} if $c->{low} < $cand->{extreme};
             my $travel = $cand->{price} - $cand->{extreme};
             if ( $travel >= $required ) {
-                $self->_consolidate($cand);
+                $self->_consolidate($cand, $market_data);
                 next;
             }
         }
@@ -298,7 +317,7 @@ sub _check_displacement {
             $cand->{extreme} = $c->{high} if $c->{high} > $cand->{extreme};
             my $travel = $cand->{extreme} - $cand->{price};
             if ( $travel >= $required ) {
-                $self->_consolidate($cand);
+                $self->_consolidate($cand, $market_data);
                 next;
             }
         }
@@ -330,7 +349,7 @@ sub _check_displacement {
 # desplazamiento puede confirmar swings fuera de orden cronologico.
 # -----------------------------------------------------------------------------
 sub _consolidate {
-    my ( $self, $cand ) = @_;
+    my ( $self, $cand, $market_data ) = @_;
 
     my $swing = {
         id    => $self->{_next_id}++,
@@ -368,6 +387,11 @@ sub _consolidate {
     $self->_insert_sorted_by_index( $self->{_trendline}, { index => $swing->{index}, price => $swing->{price} } );
 
     $self->_refresh_last_refs();
+
+    my $level = $self->_register_level( $swing->{kind}, $swing, $market_data );
+    push @{ $self->{_open_level_refs} }, $level;
+
+    $self->_check_equal_levels( $swing->{kind}, $swing );
 }
 
 # -----------------------------------------------------------------------------
@@ -406,6 +430,15 @@ sub _remove_swing {
     }
 
     delete $self->{_labels}{ $swing->{index} };
+
+    for my $i ( reverse 0 .. $#{ $self->{_levels} } ) {
+        my $lv = $self->{_levels}[$i];
+        if ( $lv->{origin_swing_id} == $swing->{id} && $lv->{state} eq 'DETECTED' ) {
+            splice( @{ $self->{_levels} }, $i, 1 );
+        }
+    }
+    $self->{_open_level_refs} =
+        [ grep { $_->{origin_swing_id} != $swing->{id} } @{ $self->{_open_level_refs} } ];
 }
 
 # -----------------------------------------------------------------------------
@@ -495,6 +528,98 @@ sub _label_for {
         return 'LL' if !defined $prev;
         return $swing->{price} >= $prev->{price} ? 'HL' : 'LL';
     }
+}
+
+sub _register_level {
+    my ( $self, $kind, $swing, $market_data ) = @_;
+    my $level = {
+        id => $self->{_next_id}++, side => ( $kind eq 'H' ? 'buy' : 'sell' ),
+        price => $swing->{price}, index => $swing->{index},
+        origin_swing_id => $swing->{id}, state => 'DETECTED',
+        classification => undef, swept_at_index => undef, resolved_at_index => undef,
+        origin_tf => undef, volumes => { '1m' => 0, '5m' => 0, '15m' => 0 },
+    };
+    $self->_attach_multi_tf_volume( $level, $swing, $market_data ) if $market_data;
+    push @{ $self->{_levels} }, $level;
+    return $level;
+}
+
+sub _attach_multi_tf_volume {
+    my ( $self, $level, $swing, $market_data ) = @_;
+    my $tf = $market_data->get_timeframe;
+    $level->{origin_tf} = $tf;
+    my $interval = $market_data->tf_interval_seconds($tf);
+    return unless defined $interval;
+    my ($ts_start, $ts_end) = ($swing->{ts}, $swing->{ts} + $interval);
+    $level->{volumes}{$_} = $market_data->sum_volume_for_tf_window($_, $ts_start, $ts_end)
+        for ('1m','5m','15m');
+}
+
+sub _check_equal_levels {
+    my ( $self, $kind, $new_swing ) = @_;
+    return unless $self->{atr};
+    my $atr_values = $self->{atr}->get_values;
+    return unless $atr_values && @$atr_values;
+    my $atr_at_new = $atr_values->[ $new_swing->{index} ];
+    return unless defined $atr_at_new;
+    my $tolerance = $atr_at_new * $self->{eq_factor};
+    for my $prev ( @{ $self->{_swings} } ) {
+        next if $prev->{id} == $new_swing->{id};
+        next unless $prev->{kind} eq $kind;
+        my $diff = abs( $prev->{price} - $new_swing->{price} );
+        next if $diff > $tolerance;
+        push @{ $self->{_equals} }, {
+            kind => ( $kind eq 'H' ? 'EQH' : 'EQL' ),
+            i1 => $prev->{index}, i2 => $new_swing->{index},
+            p1 => $prev->{price}, p2 => $new_swing->{price},
+        };
+    }
+}
+
+sub _update_state_machine {
+    my ( $self, $market_data, $i ) = @_;
+    my $candle = $market_data->get_candle($i);
+    return unless $candle;
+    my @still_open;
+    for my $level ( @{ $self->{_open_level_refs} } ) {
+        $self->_check_sweep( $level, $candle, $i )      if $level->{state} eq 'DETECTED';
+        $self->_check_resolution( $level, $candle, $i ) if $level->{state} eq 'SWEPT';
+        push @still_open, $level unless $level->{state} eq 'RESOLVED';
+    }
+    $self->{_open_level_refs} = \@still_open;
+}
+
+sub _check_sweep {
+    my ( $self, $level, $candle, $i ) = @_;
+    my $swept = ( $level->{side} eq 'buy' )
+        ? ( $candle->{high} > $level->{price} ) : ( $candle->{low} < $level->{price} );
+    return unless $swept;
+    $level->{state} = 'SWEPT';
+    $level->{swept_at_index} = $i;
+}
+
+sub _check_resolution {
+    my ( $self, $level, $candle, $i ) = @_;
+    my $n_since = $i - $level->{swept_at_index} + 1;
+    my $closed_inside = ( $level->{side} eq 'buy' )
+        ? ( $candle->{close} <= $level->{price} ) : ( $candle->{close} >= $level->{price} );
+    if ($closed_inside) {
+        $self->_resolve( $level, ( $n_since <= $self->{grab_window} ? 'GRAB' : 'SWEEP' ), $i );
+        return;
+    }
+    $self->_resolve( $level, 'RUN', $i ) if $n_since >= $self->{acceptance_n};
+}
+
+sub _resolve {
+    my ( $self, $level, $classification, $i ) = @_;
+    $level->{state} = 'RESOLVED';
+    $level->{classification} = $classification;
+    $level->{resolved_at_index} = $i;
+    my $dir = ( $level->{side} eq 'buy' ) ? 'up' : 'down';
+    push @{ $self->{_events} }, {
+        type => $classification, dir => $dir, index => $i, price => $level->{price},
+        label => $self->side_label( $level->{side} ) . ' ' . $classification,
+    };
 }
 
 1;
