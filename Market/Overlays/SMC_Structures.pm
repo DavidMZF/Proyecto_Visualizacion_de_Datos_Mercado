@@ -40,7 +40,8 @@ sub new {
     my $self = {
         source     => $args{source},
         show_bos   => $args{show_bos}   // 1,
-        show_ibos  => $args{show_ibos}  // 1,
+        show_choch => $args{show_choch} // 1,
+        show_fvg   => $args{show_fvg}   // 1,
         show_hhll  => $args{show_hhll}  // 1,   # antes sin default -> nunca se dibujaba si no se seteaba explicitamente
     };
     bless $self, $class;
@@ -59,17 +60,14 @@ sub render {
     $canvas->delete(TAG);
     my $src = $self->{source};
     return unless $src;
-    return unless $src->can('get_events');
 
-    my @placed;   # cajas [x1,y1,x2,y2] de etiquetas ya colocadas (anti-solape)
-    
-    # 1. Dibujar BOS y CHoCH
+    my @placed;
+    $self->_render_fvgs( $canvas, $scale, $src, \@placed )
+        if $self->{show_fvg} && $src->can('get_fvgs');
     $self->_render_events( $canvas, $scale, $src, \@placed )
-        if $self->{show_bos} || $self->{show_ibos};
-
-    # 2. CORRECCIÓN: Dibujar SOLO si el flag de la interfaz está encendido
+        if $self->{show_bos} || $self->{show_choch};
     $self->_render_swing_labels( $canvas, $scale, $src, \@placed )
-        if $self->{show_hhll}; # <── Agrega este interruptor aquí
+        if $self->{show_hhll};
 }
 # -----------------------------------------------------------------------------
 # _render_swing_labels: Dibuja los chips HH, HL, LH, LL exclusivamente 
@@ -115,6 +113,60 @@ sub _render_swing_labels {
     }
 }
 
+sub _render_fvgs {
+    my ( $self, $canvas, $scale, $src, $placed ) = @_;
+    my $fvgs = $src->get_fvgs or return;
+    my $last_known = $src->processed_last;
+    my $max_age    = 50;
+    my $off    = $scale->{offset};
+    my $vb     = $scale->{visible_bars};
+    my $plot_w = $scale->_plot_w;
+
+    for my $f (@$fvgs) {
+        next if $f->{state} eq 'expired';
+        my $age = $last_known - $f->{created};
+        next if $age > $max_age;
+
+        my $right_idx = ( $f->{state} eq 'mitigated' && defined $f->{mitig_at} )
+            ? $f->{mitig_at} : $f->{created} + $max_age;
+        $right_idx = $last_known if $right_idx > $last_known;
+
+        next if $right_idx      < $off;
+        next if $f->{idx_start} > $off + $vb;
+        next unless $scale->value_in_range( $f->{top} )
+                 || $scale->value_in_range( $f->{bottom} )
+                 || ( $f->{bottom} < $scale->{min_val}
+                   && $f->{top}    > $scale->{max_val} );
+
+        my $fresh   = 1 - ($age / $max_age);
+        $fresh      = 0 if $fresh < 0;
+        my $base    = ($f->{dir} eq 'bull') ? C_UP : C_DOWN;
+        my $fill_op = 0.18 + 0.17 * $fresh;
+        $fill_op   *= 0.55 if $f->{state} eq 'mitigated';
+        my $fill    = _mix($base, $fill_op);
+
+        my $x1 = $scale->index_to_center_x( $f->{idx_start} );
+        my $x2 = $scale->index_to_center_x($right_idx);
+        $x1 = 0       if $x1 < 0;
+        $x2 = $plot_w if $x2 > $plot_w;
+        next if $x2 <= $x1;
+
+        my $yt = $scale->value_to_y( $f->{top} );
+        my $yb = $scale->value_to_y( $f->{bottom} );
+
+        $canvas->createRectangle( $x1, $yt, $x2, $yb,
+            -fill => $fill, -outline => $fill, -width => 0, -tags => [TAG] );
+
+        if ( ($yb - $yt) >= 12 && $age <= int($max_age * 0.5) ) {
+            my $tx = ($x1 + $x2) / 2;
+            $tx = 24 if $tx < 24;
+            $self->_chip( $canvas, $tx, ($yt+$yb)/2, 'FVG',
+                -color => $base, -place => 'center',
+                -font  => 'TkDefaultFont 6 bold', -placed => $placed );
+        }
+    }
+}
+
 # -----------------------------------------------------------------------------
 # BOS / iBOS: linea horizontal en el nivel roto, del pivote de origen a la
 # vela de ruptura, con chip SOLIDO centrado.
@@ -135,9 +187,10 @@ sub _render_events {
         my $e = $events->[$k];
         next unless defined $e;
 
+        my $is_choch    = ( ( $e->{type}  // '' ) eq 'CHoCH' );
         my $is_internal = ( ( $e->{scope} // 'external' ) eq 'internal' );
-        next if  $is_internal && !$self->{show_ibos};
-        next if !$is_internal && !$self->{show_bos};
+        next if  $is_choch              && !$self->{show_choch};
+        next if !$is_choch              && !$self->{show_bos};
 
         my $bi = $e->{index};
         next unless defined $bi;
@@ -155,15 +208,22 @@ sub _render_events {
         my $dir   = $e->{dir} // 'up';
         my $base  = ( $dir eq 'up' ) ? C_UP : C_DOWN;
         my $color = $is_internal ? _mix_line($base) : $base;
-        my $width = $is_internal ? 1 : 2;
+        my $width = $is_choch        ? 2
+                : ( !$is_internal )  ? 2
+                :                       1;
 
         $canvas->createLine( $x1, $y, $x2, $y,
             -fill => $color, -width => $width,
-            ( $is_internal ? ( -dash => [ 5, 3 ] ) : () ),
+            ( $is_choch || $is_internal ? ( -dash => [5,3] ) : () ),
             -tags => [TAG] );
-
         my $up = ( $dir eq 'up' );
-        my $label = $e->{label} // ( $is_internal ? 'iBOS' : 'BOS' );
+        my $label;
+        if ($is_choch) {
+            $label = $is_internal ? 'CHoCH (int)' : 'CHoCH';
+        } else {
+            $label = $is_internal ? 'iBOS' : 'BOS';
+        }
+
         $self->_chip( $canvas, ( $x1 + $x2 ) / 2, $y, $label,
             -color => $color, -style => 'solid',
             -place => ( $up ? 'above' : 'below' ), -placed => $placed );
@@ -247,7 +307,7 @@ sub _mix {
                           hex( substr( $hex, 3, 2 ) ),
                           hex( substr( $hex, 5, 2 ) ) );
     my $f = 1 - $op;
-    my ( $br, $bg, $bb ) = ( 13, 17, 23 );
+    my ( $br, $bg, $bb ) = ( 214, 219, 230 );
     $r = int( $r + ( $br - $r ) * $f );
     $g = int( $g + ( $bg - $g ) * $f );
     $b = int( $b + ( $bb - $b ) * $f );

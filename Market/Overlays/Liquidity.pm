@@ -74,8 +74,6 @@ sub new {
     return $self;
 }
 
-sub tag { return TAG; }
-
 sub set_flag {
     my ( $self, $flag, $val ) = @_;
     $self->{$flag} = $val ? 1 : 0;
@@ -144,7 +142,7 @@ sub _render_levels {
         next if $kind eq 'sell' && !$self->{show_ssl};
 
         my @resting = grep {
-            $_->{side} eq $kind && $_->{state} ne 'RESOLVED'
+            $_->{side} eq $kind && $_->{state} ne 'RESOLVED' && $_->{state} ne 'EXPIRED'
         } @$levels;
         @resting = @resting[ -MAX_LINES .. -1 ] if @resting > MAX_LINES;
 

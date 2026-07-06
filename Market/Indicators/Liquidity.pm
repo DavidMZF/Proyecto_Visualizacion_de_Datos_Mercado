@@ -75,6 +75,10 @@ sub new {
         grab_window   => $args{grab_window}  // 3,
         acceptance_n  => $args{acceptance_n} // 10,
 
+        level_min_dist_atr => $args{level_min_dist_atr} // 0.5,  # distancia minima (x ATR) entre niveles activos del mismo lado
+        level_expiry_n     => $args{level_expiry_n}     // 80,   # velas tras las cuales un nivel DETECTED no tocado expira
+        eq_lookback        => $args{eq_lookback}        // 30,
+
         _c   => [],   # velas conocidas (indice = indice de vela global)
         _atr => [],   # cache local de get_values() del ATR, se refresca cada update
 
@@ -378,8 +382,8 @@ sub _consolidate {
     $self->_refresh_last_refs();
 
     my $level = $self->_register_level( $swing->{kind}, $swing, $market_data );
-    push @{ $self->{_open_level_refs} }, $level;
-
+    push @{ $self->{_open_level_refs} }, $level
+        unless grep { $_ == $level } @{ $self->{_open_level_refs} };
     $self->_check_equal_levels( $swing->{kind}, $swing );
 }
 
@@ -464,9 +468,34 @@ sub _refresh_last_refs {
 }
 
 sub _register_level {
-    my ( $self, $kind, $swing, $market_data ) = @_;
+     my ( $self, $kind, $swing, $market_data ) = @_;
+    my $side = ( $kind eq 'H' ? 'buy' : 'sell' );
+
+    # --- FILTRO DE NOVEDAD: evita clusters de niveles casi superpuestos ---
+    my $atr_now = $self->_atr_at( $swing->{index} );
+    if ( defined $atr_now && $atr_now > 0 ) {
+        my $min_dist = $self->{level_min_dist_atr} * $atr_now;
+        for my $lv ( @{ $self->{_levels} } ) {
+            next unless $lv->{side} eq $side;
+            next unless $lv->{state} eq 'DETECTED';   # solo compite con niveles aun activos
+            if ( abs( $lv->{price} - $swing->{price} ) < $min_dist ) {
+                # Ya hay un nivel activo muy cerca: lo actualizamos al swing
+                # mas reciente/extremo en vez de crear uno nuevo.
+                my $more_extreme = ( $side eq 'buy' )
+                    ? ( $swing->{price} > $lv->{price} )
+                    : ( $swing->{price} < $lv->{price} );
+                if ($more_extreme) {
+                    $lv->{price} = $swing->{price};
+                    $lv->{index} = $swing->{index};
+                    $lv->{origin_swing_id} = $swing->{id};
+                }
+                return $lv;   # no se crea nivel nuevo
+            }
+        }
+    }
+
     my $level = {
-        id => $self->{_next_id}++, side => ( $kind eq 'H' ? 'buy' : 'sell' ),
+        id => $self->{_next_id}++, side => $side,
         price => $swing->{price}, index => $swing->{index},
         origin_swing_id => $swing->{id}, state => 'DETECTED',
         classification => undef, swept_at_index => undef, resolved_at_index => undef,
@@ -489,14 +518,21 @@ sub _attach_multi_tf_volume {
 }
 
 sub _check_equal_levels {
-    my ( $self, $kind, $new_swing ) = @_;
+   my ( $self, $kind, $new_swing ) = @_;
     return unless $self->{atr};
     my $atr_values = $self->{atr}->get_values;
     return unless $atr_values && @$atr_values;
     my $atr_at_new = $atr_values->[ $new_swing->{index} ];
     return unless defined $atr_at_new;
     my $tolerance = $atr_at_new * $self->{eq_factor};
-    for my $prev ( @{ $self->{_swings} } ) {
+
+    # Solo comparar contra los ultimos N swings (ventana reciente), no todo el historico
+    my $swings = $self->{_swings};
+    my $from = @$swings - $self->{eq_lookback};
+    $from = 0 if $from < 0;
+
+    for my $idx ( $from .. $#$swings ) {
+        my $prev = $swings->[$idx];
         next if $prev->{id} == $new_swing->{id};
         next unless $prev->{kind} eq $kind;
         my $diff = abs( $prev->{price} - $new_swing->{price} );
@@ -516,6 +552,10 @@ sub _update_state_machine {
     my @still_open;
     for my $level ( @{ $self->{_open_level_refs} } ) {
         $self->_check_sweep( $level, $candle, $i )      if $level->{state} eq 'DETECTED';
+        if ( $level->{state} eq 'DETECTED'
+            && ( $i - $level->{index} ) >= $self->{level_expiry_n} ) {
+            $level->{state} = 'EXPIRED';
+        }
         $self->_check_resolution( $level, $candle, $i ) if $level->{state} eq 'SWEPT';
         push @still_open, $level unless $level->{state} eq 'RESOLVED';
     }

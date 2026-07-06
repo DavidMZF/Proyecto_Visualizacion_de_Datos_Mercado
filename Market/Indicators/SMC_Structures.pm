@@ -54,6 +54,7 @@ sub new {
     my $self = {
         liquidity   => $args{liquidity},          # YA NO se usa para BOS/iBOS (ver _ingest_new_swings); se conserva solo por compatibilidad de firma si algo externo la pasa.
         zzmtf       => $args{zzmtf},              # FUENTE UNICA de swings para BOS/iBOS y para HH/HL/LH/LL: Indicators::ZigZagMTF
+        zzvp => $args{zzvp},
         break_mode  => $args{break_mode} // 'close',   # 'close' | 'wick'
 
         # --- FASE 3: filtros de relevancia / anti-saturacion ---
@@ -69,12 +70,15 @@ sub new {
 
         _c      => [],    # velas procesadas
         _events => [],    # eventos BOS / iBOS confirmados
+        _fvgs        => [],
+        _active_fvgs => [],
 
         # Niveles activos (precio) aun no rotos.
         _bos_high  => undef,
         _bos_low   => undef,
         _ibos_high => undef,
         _ibos_low  => undef,
+        max_age => $args{max_age} // 50,
 
         # Indice del swing que sostiene cada nivel activo.
         _bos_high_index  => undef,
@@ -103,6 +107,20 @@ sub new {
         # HH/HL/LH/LL) para no acoplar ambos usos.
         _sig_ref_high => undef,
         _sig_ref_low  => undef,
+        _ext_bh_idx => -1,      # ultimo pivot H externo ya roto
+        _ext_bl_idx => -1,      # ultimo pivot L externo ya roto
+        _int_high => undef, _int_low => undef,
+        _int_high_index => undef, _int_low_index => undef,
+        _int_bias => undef,
+        _seen_swing_id => {},
+        _sig_ref_high => undef, _sig_ref_low => undef,
+
+        # Estructura EXTERNA (ZigZag Volume Profile)
+        _ext_high => undef, _ext_low => undef,
+        _ext_high_index => undef, _ext_low_index => undef,
+        _ext_bias => undef,
+        _seen_ext_id => {},
+        _ext_sig_ref_high => undef, _ext_sig_ref_low => undef, 
     };
     bless $self, $class;
     return $self;
@@ -132,6 +150,7 @@ sub reset {
     $self->{_last_high}     = undef;
     $self->{_last_low}      = undef;
     $self->{_bias}          = undef;
+    $self->{_int_bias}          = undef;
 
     # Reset referencias de amplitud (Fase 3)
     $self->{_sig_ref_high} = undef;
@@ -156,20 +175,26 @@ sub update_last {
 sub get_events       { return $_[0]->{_events}; }
 sub processed_last   { return $#{ $_[0]->{_c} }; }
 sub get_swing_labels { return $_[0]->{_swing_labels}; } # NUEVO ACCESOR PARA OVERLAY
+sub get_fvgs      { return $_[0]->{_fvgs}; }
+sub get_candle_at { return $_[0]->{_c}[ $_[1] ]; }
 
 # -----------------------------------------------------------------------------
 # _process: integra la vela en el indice i = $#_c.
 # -----------------------------------------------------------------------------
 sub _process {
-    my ( $self, $c ) = @_;
+     my ( $self, $c ) = @_;
     push @{ $self->{_c} }, $c;
     my $i = $#{ $self->{_c} };
+    
+    $self->_update_fvgs($i);       # Actualiza o mitiga FVGs previos con la vela actual
+    $self->_detect_fvg($i);
 
-    $self->_ingest_new_swings($i);
-    $self->_check_break( $i, $c, 'ibos' );
-    $self->_check_break( $i, $c, 'bos' );
+    $self->_ingest_internal($i);   # zzmtf -> _int_high/_int_low
+    $self->_ingest_external($i);   # zzvp  -> _ext_high/_ext_low
 
-    # NUEVA LLAMADA: Clasificar HH/HL/LH/LL usando exclusivamente el ZZMTF
+    $self->_check_break_scope( $i, $c, 'internal' );
+    $self->_check_break_scope( $i, $c, 'external' );
+
     $self->_classify_zzmtf_pivots();
 }
 
@@ -243,7 +268,7 @@ sub _is_significant {
 #   (para no reevaluarlo) pero NO genera nivel ni se usa como nueva
 #   referencia: es ruido, y el ruido no debe alimentar mas ruido.
 # -----------------------------------------------------------------------------
-sub _ingest_new_swings {
+sub _ingest_internal {
     my ( $self, $i ) = @_;
     my $zz = $self->{zzmtf};
     return unless $zz;
@@ -251,50 +276,59 @@ sub _ingest_new_swings {
     my $swings = $zz->get_swings;
     return unless $swings && @$swings;
 
-    # Solo swings nuevos (no vistos) y cuyo indice base ya quedo atras de la
-    # vela actual (no podemos anclar un nivel a una vela futura).
     my @new = grep {
         !$self->{_seen_swing_id}{ $_->{id} } && $_->{index} < $i
     } @$swings;
     return unless @new;
 
-    # CRITICO: ordenar por indice base real antes de procesar, porque el
-    # retraso de confirmacion del ZigZagMTF no garantiza que get_swings()
-    # devuelva los pivotes nuevos en orden cronologico de mercado.
     @new = sort { $a->{index} <=> $b->{index} } @new;
 
     for my $sw (@new) {
         $self->{_seen_swing_id}{ $sw->{id} } = 1;
 
         if ( $sw->{kind} eq 'H' ) {
-            # FASE 3: filtro de relevancia contra el ultimo LOW significativo.
             next unless $self->_is_significant( $sw->{price}, $self->{_sig_ref_low} );
-            $self->{_sig_ref_high} = $sw->{price};
-
-            if ( !defined $self->{_bos_high} ) {
-                $self->{_bos_high}       = $sw->{price};
-                $self->{_bos_high_index} = $sw->{index};
-                $self->{_principal_high_index} = $sw->{index};
-            }
-            else {
-                $self->{_ibos_high}       = $sw->{price};
-                $self->{_ibos_high_index} = $sw->{index};
-            }
+            $self->{_sig_ref_high}   = $sw->{price};
+            $self->{_int_high}       = $sw->{price};
+            $self->{_int_high_index} = $sw->{index};
         }
-        else {   # 'L'
-            # FASE 3: filtro de relevancia contra el ultimo HIGH significativo.
+        else {
             next unless $self->_is_significant( $sw->{price}, $self->{_sig_ref_high} );
-            $self->{_sig_ref_low} = $sw->{price};
+            $self->{_sig_ref_low}   = $sw->{price};
+            $self->{_int_low}       = $sw->{price};
+            $self->{_int_low_index} = $sw->{index};
+        }
+    }
+}
+sub _ingest_external {
+    my ( $self, $i ) = @_;
+    my $zz = $self->{zzvp};
+    return unless $zz;
 
-            if ( !defined $self->{_bos_low} ) {
-                $self->{_bos_low}       = $sw->{price};
-                $self->{_bos_low_index} = $sw->{index};
-                $self->{_principal_low_index} = $sw->{index};
-            }
-            else {
-                $self->{_ibos_low}       = $sw->{price};
-                $self->{_ibos_low_index} = $sw->{index};
-            }
+    my $pivots = $zz->get_pivots;
+    return unless $pivots && @$pivots;
+
+    my @new = grep {
+        !$self->{_seen_ext_id}{ $_->{id} } && $_->{index} < $i
+    } @$pivots;
+    return unless @new;
+
+    @new = sort { $a->{index} <=> $b->{index} } @new;
+
+    for my $sw (@new) {
+        $self->{_seen_ext_id}{ $sw->{id} } = 1;
+
+        if ( $sw->{kind} eq 'H' ) {
+            next unless $self->_is_significant( $sw->{price}, $self->{_ext_sig_ref_low} );
+            $self->{_ext_sig_ref_high} = $sw->{price};
+            $self->{_ext_high}         = $sw->{price};
+            $self->{_ext_high_index}   = $sw->{index};
+        }
+        else {
+            next unless $self->_is_significant( $sw->{price}, $self->{_ext_sig_ref_high} );
+            $self->{_ext_sig_ref_low} = $sw->{price};
+            $self->{_ext_low}         = $sw->{price};
+            $self->{_ext_low_index}   = $sw->{index};
         }
     }
 }
@@ -321,22 +355,21 @@ sub _break_threshold {
 # _check_break (Fase 3: ahora exige superar el nivel + margen minimo, no
 # cualquier exceso marginal, para confirmar la ruptura).
 # -----------------------------------------------------------------------------
-sub _check_break {
+sub _check_break_scope {
     my ( $self, $i, $c, $scope ) = @_;
 
-    my $high_key       = $scope eq 'bos' ? '_bos_high'       : '_ibos_high';
-    my $low_key        = $scope eq 'bos' ? '_bos_low'        : '_ibos_low';
-    my $high_index_key = $scope eq 'bos' ? '_bos_high_index' : '_ibos_high_index';
-    my $low_index_key  = $scope eq 'bos' ? '_bos_low_index'  : '_ibos_low_index';
+    my ( $high_key, $low_key, $high_idx_key, $low_idx_key, $bias_key ) =
+        $scope eq 'internal'
+        ? ( '_int_high', '_int_low', '_int_high_index', '_int_low_index', '_int_bias' )
+        : ( '_ext_high', '_ext_low', '_ext_high_index', '_ext_low_index', '_ext_bias' );
 
     if ( defined $self->{$high_key} ) {
         my $ref_price = ( $self->{break_mode} eq 'wick' ) ? $c->{high} : $c->{close};
         my $threshold = $self->_break_threshold( $self->{$high_key}, 'up' );
         if ( $ref_price > $threshold ) {
-            $self->_emit( $scope, 'up', $i, $self->{$high_key}, $self->{$high_index_key} );
-            $self->{$high_key}       = undef;
-            $self->{$high_index_key} = undef;
-            $self->_reset_ibos_on_bos() if $scope eq 'bos';
+            $self->_emit( $scope, 'up', $i, $self->{$high_key}, $self->{$high_idx_key}, $bias_key );
+            $self->{$high_key}     = undef;
+            $self->{$high_idx_key} = undef;
             return;
         }
     }
@@ -345,10 +378,9 @@ sub _check_break {
         my $ref_price = ( $self->{break_mode} eq 'wick' ) ? $c->{low} : $c->{close};
         my $threshold = $self->_break_threshold( $self->{$low_key}, 'down' );
         if ( $ref_price < $threshold ) {
-            $self->_emit( $scope, 'down', $i, $self->{$low_key}, $self->{$low_index_key} );
-            $self->{$low_key}       = undef;
-            $self->{$low_index_key} = undef;
-            $self->_reset_ibos_on_bos() if $scope eq 'bos';
+            $self->_emit( $scope, 'down', $i, $self->{$low_key}, $self->{$low_idx_key}, $bias_key );
+            $self->{$low_key}     = undef;
+            $self->{$low_idx_key} = undef;
             return;
         }
     }
@@ -363,18 +395,20 @@ sub _reset_ibos_on_bos {
 }
 
 sub _emit {
-    my ( $self, $scope, $dir, $i, $price, $origin ) = @_;
-    my $label = ( $scope eq 'bos' ) ? 'BOS' : 'iBOS';
+    my ( $self, $scope, $dir, $i, $price, $origin, $bias_key ) = @_;
+
+    my $type = ( defined $self->{$bias_key} && $self->{$bias_key} ne $dir )
+        ? 'CHoCH' : 'BOS';
+    $self->{$bias_key} = $dir;
 
     push @{ $self->{_events} }, {
-        type      => $scope eq 'bos' ? 'BOS' : 'iBOS',
-        scope     => $scope eq 'bos' ? 'external' : 'internal',
+        type      => $type,
+        scope     => $scope,   # 'internal' (zzmtf) | 'external' (zzvp)
         dir       => $dir,
         index     => $i,
         origin    => $origin,
         ts        => $self->{_c}[$i]{ts},
         price     => $price,
-        label     => $label,
         confirmed => 1,
     };
 }
@@ -463,6 +497,106 @@ sub _classify_zzmtf_pivots {
             }
         }
     }
+}
+
+sub _detect_fvg {
+    my ( $self, $i ) = @_;
+    return if $i < 2;
+    my $c = $self->{_c};
+    my $a = $c->[$i - 2];
+    my $z = $c->[$i];
+    my $fvg;
+    if ( $z->{low} > $a->{high} ) {
+        $fvg = { dir=>'bull', idx_start=>$i-2, created=>$i,
+                 bottom=>$a->{high}, top=>$z->{low},
+                 state=>'active', mitig_at=>undef };
+    } elsif ( $z->{high} < $a->{low} ) {
+        $fvg = { dir=>'bear', idx_start=>$i-2, created=>$i,
+                 bottom=>$z->{high}, top=>$a->{low},
+                 state=>'active', mitig_at=>undef };
+    }
+    if ($fvg) {
+        push @{ $self->{_fvgs} },        $fvg;
+        push @{ $self->{_active_fvgs} }, $fvg;
+    }
+}
+
+sub _update_fvgs {
+    my ( $self, $i ) = @_;
+    my $cur = $self->{_c}[$i];
+    my @keep;
+    for my $f ( @{ $self->{_active_fvgs} } ) {
+        if ( $i <= $f->{created} ) { push @keep, $f; next; }
+        
+        if ( $f->{dir} eq 'bull' && $cur->{low} <= $f->{top} )
+            { $f->{state}='mitigated'; $f->{mitig_at}=$i; next; }
+            
+        if ( $f->{dir} eq 'bear' && $cur->{high} >= $f->{bottom} )
+            { $f->{state}='mitigated'; $f->{mitig_at}=$i; next; }
+            
+        if ( ($i - $f->{created}) > $self->{max_age} )
+            { $f->{state}='expired'; next; }
+        push @keep, $f;
+    }
+    $self->{_active_fvgs} = \@keep
+}
+
+sub _detect_external {
+    my ( $self, $i ) = @_;
+    my $zzvp = $self->{zzvp};
+    return unless $zzvp;
+    my $pivots = $zzvp->get_pivots;
+    return unless $pivots && @$pivots;
+    my $cur = $self->{_c}[$i];
+
+    my ($last_h, $last_l);
+    for my $pv ( reverse @$pivots ) {
+        $last_h //= $pv if $pv->{kind} eq 'H' && $pv->{index} < $i;
+        $last_l //= $pv if $pv->{kind} eq 'L' && $pv->{index} < $i;
+        last if $last_h && $last_l;
+    }
+
+    if ( $last_h && $last_h->{index} != $self->{_ext_bh_idx} ) {
+        my $threshold = $self->_break_threshold( $last_h->{price}, 'up' );
+        my $ref = $self->{break_mode} eq 'wick' ? $cur->{high} : $cur->{close};
+        if ( $ref > $threshold ) {
+            my $type = ( defined $self->{_ext_bias} && $self->{_ext_bias} eq 'bear' )
+                ? 'CHoCH' : 'BOS';
+            $self->_emit_typed( $type, 'external', 'up', $i,
+                                $last_h->{price}, $last_h->{index} );
+            $self->{_ext_bias}   = 'bull';
+            $self->{_ext_bh_idx} = $last_h->{index};
+        }
+    }
+
+    if ( $last_l && $last_l->{index} != $self->{_ext_bl_idx} ) {
+        my $threshold = $self->_break_threshold( $last_l->{price}, 'down' );
+        my $ref = $self->{break_mode} eq 'wick' ? $cur->{low} : $cur->{close};
+        if ( $ref < $threshold ) {
+            my $type = ( defined $self->{_ext_bias} && $self->{_ext_bias} eq 'bull' )
+                ? 'CHoCH' : 'BOS';
+            $self->_emit_typed( $type, 'external', 'down', $i,
+                                $last_l->{price}, $last_l->{index} );
+            $self->{_ext_bias}   = 'bear';
+            $self->{_ext_bl_idx} = $last_l->{index};
+        }
+    }
+}
+
+# _emit_typed: version que recibe el type ya resuelto (usado por _detect_external)
+sub _emit_typed {
+    my ( $self, $type, $scope, $dir, $i, $price, $origin ) = @_;
+    push @{ $self->{_events} }, {
+        type      => $type,
+        scope     => $scope,
+        dir       => $dir,
+        index     => $i,
+        origin    => $origin,
+        ts        => $self->{_c}[$i]{ts},
+        price     => $price,
+        label     => $type,
+        confirmed => 1,
+    };
 }
 
 1;

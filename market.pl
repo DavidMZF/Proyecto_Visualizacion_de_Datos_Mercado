@@ -155,12 +155,6 @@ my $zzmtf_ind = Market::Indicators::ZigZagMTF->new(
     period             => 2,    # ZigZag Period (estilo ZZMTF)
 );
 
-# 2. PASO CRÍTICO: Inyectamos la referencia del ZigZag al crear SMC_Structures
-my $smc_ind = Market::Indicators::SMC_Structures->new(
-    liquidity  => $liq_ind, 
-    zzmtf      => $zzmtf_ind,   # <-- ESTA LÍNEA CONECTA EL MOTOR ANALÍTICO
-    break_mode => 'close' 
-);
 
 # ZigZag Volume Profile (direccion EXTERNA): zigzag de mayor grado sobre la
 # temporalidad base, con volume profile + POC por pierna.
@@ -170,11 +164,19 @@ my $zzvp_ind = Market::Indicators::ZigZagVolumeProfile->new(
     max_profiles => 15,
 );
 
+# 2. PASO CRÍTICO: Inyectamos la referencia del ZigZag al crear SMC_Structures
+my $smc_ind = Market::Indicators::SMC_Structures->new(
+    zzmtf      => $zzmtf_ind,
+    zzvp       => $zzvp_ind,
+    break_mode => 'close',
+    max_age    => 50,
+);
+
 $ind_manager->register('atr',       $atr_ind);
 $ind_manager->register('liquidity', $liq_ind);
 $ind_manager->register('zzmtf',     $zzmtf_ind); # <-- Sube a 3er lugar
-$ind_manager->register('smc',       $smc_ind);   # <-- Baja a 4to lugar
 $ind_manager->register('zzvp',      $zzvp_ind);
+$ind_manager->register('smc',       $smc_ind);   # <-- Baja a 4to lugar
 
 print "Calculando indicadores (ATR, Liquidity, SMC, ZigZag MTF/VP)...\n";
 $ind_manager->rebuild_all($market);
@@ -615,20 +617,17 @@ my $make_chk = sub {
 # =============================================================================
 # Columna SMC STRUCTURES (BOS / iBOS)
 # =============================================================================
-my %SMC = (
-    show_bos  => 0,
-    show_ibos => 0,
-    show_hhll => 0,
-);
+my %SMC = ( show_bos => 0, show_choch => 0, show_fvg => 0, show_hhll => 0 );
 my $smc_master = 0;
 my $refresh_smc = sub {
     $smc_overlay->set_flag($_, $SMC{$_}) for keys %SMC;
-    my $any = ( $SMC{show_bos} || $SMC{show_ibos} || $SMC{show_hhll} ) ? 1 : 0;
+    my $any = 0; $any ||= $SMC{$_} for keys %SMC;
     $overlay_mgr->set_visible('smc', $any);
     $engine->request_render;
 };
 my $sync_smc_master = sub {
-    $smc_master = ( $SMC{show_bos} && $SMC{show_ibos} && $SMC{show_hhll} ) ? 1 : 0;
+    my $all = 1; $all &&= $SMC{$_} for keys %SMC;
+    $smc_master = $all;
 };
 my $leaf_smc = sub { $refresh_smc->(); $sync_smc_master->(); };
 
@@ -637,9 +636,10 @@ $make_chk->($col_smc, 'Activar SMC', \$smc_master, sub {
     $SMC{$_} = $smc_master for keys %SMC;   # master = encender/apagar TODO SMC
     $refresh_smc->();
 });
-$make_chk->($col_smc, 'BOS',  \$SMC{show_bos},  $leaf_smc);
-$make_chk->($col_smc, 'iBOS', \$SMC{show_ibos}, $leaf_smc);
-$make_chk->($col_smc, 'HH/HL/LH/LL', \$SMC{show_hhll}, $leaf_smc);
+$make_chk->($col_smc, 'BOS',         \$SMC{show_bos},   $leaf_smc);
+$make_chk->($col_smc, 'CHoCH',       \$SMC{show_choch}, $leaf_smc);
+$make_chk->($col_smc, 'FVG',         \$SMC{show_fvg},   $leaf_smc);
+$make_chk->($col_smc, 'HH/HL/LH/LL',\$SMC{show_hhll},  $leaf_smc);
 
 $tools_bar->Frame(-background => '#2a3445', -width => 1, -height => 16)
     ->pack(-side => 'left', -pady => 4, -padx => 4);
