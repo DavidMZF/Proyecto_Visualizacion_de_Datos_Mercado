@@ -124,6 +124,47 @@ sub get_pivots   { return $_[0]->{_pivots}; }
 sub get_segments { return $_[0]->{_segments}; }
 
 # -----------------------------------------------------------------------------
+# get_swings: pivotes confirmados (mismo criterio de alternancia estricta que
+# antes vivia en Indicators::Liquidity), pero ya mapeados al indice de la
+# temporalidad BASE del grafico (index_base), listos para que cualquier
+# overlay (Liquidity, SMC_Structures, etc.) los dibuje sin recalcular nada.
+# Formato: { id, index => index_base, kind => 'H'|'L', price }
+# -----------------------------------------------------------------------------
+sub get_swings {
+    my ($self) = @_;
+    my @out;
+    for my $p ( @{ $self->{_pivots} } ) {
+        push @out, {
+            id    => $p->{id},
+            index => $self->_base_index_for_pivot($p),
+            kind  => $p->{kind},
+            price => $p->{price},
+        };
+    }
+    return \@out;
+}
+
+# -----------------------------------------------------------------------------
+# get_trendline: polilinea cronologica de TODOS los pivotes confirmados
+# (highs y lows intercalados), ya mapeados a indice base. Reemplaza la
+# trendline que antes construia Indicators::Liquidity a partir de sus swings
+# crudos (fractal_n + ATR); ahora se basa en la direccion interna del
+# ZigZagMTF, consistente con get_swings() de arriba.
+# -----------------------------------------------------------------------------
+sub get_trendline {
+    my ($self) = @_;
+    my @out;
+    for my $p ( @{ $self->{_pivots} } ) {
+        push @out, {
+            index => $self->_base_index_for_pivot($p),
+            price => $p->{price},
+        };
+    }
+    return \@out;
+}
+
+
+# -----------------------------------------------------------------------------
 # get_tentative_segment: tramo PROVISIONAL desde el ultimo pivote consolidado
 # hasta la vela base mas reciente conocida. No es un pivote confirmado (no
 # paso por fractalidad ni alternancia): es solo una guia visual para que la

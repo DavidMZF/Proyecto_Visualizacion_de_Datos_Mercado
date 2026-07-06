@@ -194,7 +194,7 @@ printf "ATR: %d  |  swings: %d  |  eventos liq: %d  |  eventos BOS/iBOS: %d  |  
 # =============================================================================
 my $overlay_mgr = Market::OverlayManager->new;
 my $smc_overlay   = Market::Overlays::SMC_Structures->new( source => $smc_ind );
-my $liq_overlay   = Market::Overlays::Liquidity->new( source => $liq_ind );
+my $liq_overlay   = Market::Overlays::Liquidity->new( source => $liq_ind, swing_source => $zzmtf_ind );
 my $zzmtf_overlay = Market::Overlays::ZigZagMTF->new( source => $zzmtf_ind );
 my $zzvp_overlay  = Market::Overlays::ZigZagVolumeProfile->new( source => $zzvp_ind );
 $overlay_mgr->register('smc',       $smc_overlay, visible => 0);
@@ -715,8 +715,6 @@ $make_chk->($col_liq, 'Activar Liquidity', \$liq_master, sub {
     $LIQ{$_} = $liq_master for keys %LIQ;
     $refresh_liq->();
 });
-$make_chk->($col_liq, 'Swing Points',  \$LIQ{show_swing},  $leaf_liq);
-$make_chk->($col_liq, 'Trend Line',    \$LIQ{show_trendline}, $leaf_liq);
 $make_chk->($col_liq, 'BSL - Buy Side',  \$LIQ{show_bsl},  $leaf_liq);
 $make_chk->($col_liq, 'SSL - Sell Side', \$LIQ{show_ssl},  $leaf_liq);
 $make_chk->($col_liq, 'EQH',     \$LIQ{show_eqh},    $leaf_liq);

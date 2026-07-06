@@ -41,6 +41,7 @@ sub new {
         source     => $args{source},
         show_bos   => $args{show_bos}   // 1,
         show_ibos  => $args{show_ibos}  // 1,
+        show_hhll  => $args{show_hhll}  // 1,   # antes sin default -> nunca se dibujaba si no se seteaba explicitamente
     };
     bless $self, $class;
     return $self;
