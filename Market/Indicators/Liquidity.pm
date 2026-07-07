@@ -65,6 +65,9 @@ sub new {
     my ( $class, %args ) = @_;
     my $self = {
         atr           => $args{atr},              # Indicators::ATR (get_values)
+        source        => $args{source},
+        zzmtf         => $args{zzmtf},   # Indicators::ZigZagMTF
+        zzvp          => $args{zzvp},
         fractal_n     => $args{fractal_n} // $args{k} // 3,   # N velas a cada lado
         m_atr         => $args{m_atr}     // 1.5,  # multiplicador filtro volatilidad
         atr_period    => $args{atr_period}// 14,   # informativo (el ATR ya trae su periodo)
@@ -182,6 +185,8 @@ sub update_at_index {
     my $c = $md->get_candle($idx);
     return unless defined $c;
     $self->_ingest($md, $c, $idx);
+    $self->_sync_levels_from_internal_zigzag($md);   # en vez de _try_confirm_swing
+    $self->_update_state_machine($md, $idx);
 }
 
 sub update_last {
@@ -369,7 +374,7 @@ sub _consolidate {
                 ? ( $swing->{price} > $same_kind_neighbor->{price} )
                 : ( $swing->{price} < $same_kind_neighbor->{price} );
 
-        return unless $new_is_more_extreme;   # candidato no es el extremo real: descartado
+        return unless $new_is_more_extreme;
 
         $self->_remove_swing($same_kind_neighbor);
         $pos = $self->_find_insert_pos( $swing->{index} );
@@ -381,9 +386,6 @@ sub _consolidate {
 
     $self->_refresh_last_refs();
 
-    my $level = $self->_register_level( $swing->{kind}, $swing, $market_data );
-    push @{ $self->{_open_level_refs} }, $level
-        unless grep { $_ == $level } @{ $self->{_open_level_refs} };
     $self->_check_equal_levels( $swing->{kind}, $swing );
 }
 
@@ -595,4 +597,44 @@ sub _resolve {
     };
 }
 
+sub _external_phase {
+    my ($self) = @_;
+    my $zzvp = $self->{zzvp} or return undef;
+    my $pivots = $zzvp->get_pivots;
+    return undef unless $pivots && @$pivots;
+
+    my $last = $pivots->[-1];
+    # Un ultimo pivote 'L' confirmado implica que la fase vigente es alcista
+    # (se viene buscando el proximo techo); un 'H' implica fase bajista.
+    return $last->{kind} eq 'L' ? 'up' : 'down';
+}
+
+sub _sync_levels_from_internal_zigzag {
+    my ( $self, $market_data ) = @_;
+    my $zzmtf = $self->{zzmtf} or return;
+    my $swings = $zzmtf->get_swings or return;
+
+    $self->{_seen_swing_ids} //= {};
+
+    for my $sw (@$swings) {
+        next if $self->{_seen_swing_ids}{ $sw->{id} };
+
+        my $phase = $self->_external_phase;
+
+        # Si aun no hay fase externa disponible, igual registramos el nivel
+        # (sin clasificar prioridad) en vez de descartarlo indefinidamente.
+        my $priority = 'normal';
+        if ( defined $phase ) {
+            my $retracement_end_kind = ( $phase eq 'up' ) ? 'L' : 'H';
+            $priority = ( $sw->{kind} eq $retracement_end_kind ) ? 'high' : 'normal';
+        }
+
+        $self->{_seen_swing_ids}{ $sw->{id} } = 1;
+
+        my $level = $self->_register_level( $sw->{kind}, $sw, $market_data );
+        $level->{priority} = $priority;   # metadato para el overlay (opcional)
+        push @{ $self->{_open_level_refs} }, $level
+            unless grep { $_ == $level } @{ $self->{_open_level_refs} };
+    }
+}
 1;

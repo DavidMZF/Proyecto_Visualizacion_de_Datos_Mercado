@@ -139,14 +139,6 @@ my $ind_manager = Market::IndicatorManager->new;
 # indicadores en este orden. Liquidity necesita el ATR ya calculado (tolerancia
 # EQH/EQL) y SMC_Structures necesita los swings ya confirmados por Liquidity.
 my $atr_ind = Market::Indicators::ATR->new(14);
-my $liq_ind = Market::Indicators::Liquidity->new(
-    atr        => $atr_ind,
-    fractal_n  => 3,     # N velas a cada lado para fractalidad base
-    m_atr      => 1.5,   # multiplicador ATR (filtro 1: volatilidad)
-    atr_period => 14,
-    v_desp     => 10,    # ventana max. de velas para validar desplazamiento
-    u_desp     => 2.0,   # multiplicador ATR de recorrido minimo (filtro 2)
-);
 
 # ZigZag Multi Time Frame (direccion INTERNA): remuestrea a 30min por
 # defecto y corre un zigzag clasico por periodo, independiente de ATR.
@@ -155,6 +147,7 @@ my $zzmtf_ind = Market::Indicators::ZigZagMTF->new(
     period             => 2,    # ZigZag Period (estilo ZZMTF)
 );
 
+my $liq_expiry = $zzmtf_ind->{resolution_minutes} * 10;
 
 # ZigZag Volume Profile (direccion EXTERNA): zigzag de mayor grado sobre la
 # temporalidad base, con volume profile + POC por pierna.
@@ -164,6 +157,17 @@ my $zzvp_ind = Market::Indicators::ZigZagVolumeProfile->new(
     max_profiles => 15,
 );
 
+my $liq_ind = Market::Indicators::Liquidity->new(
+    atr        => $atr_ind,
+    zzmtf      => $zzmtf_ind,   
+    zzvp       => $zzvp_ind,
+    fractal_n  => 3,     # N velas a cada lado para fractalidad base
+    m_atr      => 1.5,   # multiplicador ATR (filtro 1: volatilidad)
+    atr_period => 14,
+    v_desp     => 10,    # ventana max. de velas para validar desplazamiento
+    u_desp     => 2.0,   # multiplicador ATR de recorrido minimo (filtro 2)
+    level_expiry_n => $liq_expiry,
+);
 # 2. PASO CRÍTICO: Inyectamos la referencia del ZigZag al crear SMC_Structures
 my $smc_ind = Market::Indicators::SMC_Structures->new(
     zzmtf      => $zzmtf_ind,
@@ -173,13 +177,24 @@ my $smc_ind = Market::Indicators::SMC_Structures->new(
 );
 
 $ind_manager->register('atr',       $atr_ind);
-$ind_manager->register('liquidity', $liq_ind);
 $ind_manager->register('zzmtf',     $zzmtf_ind); # <-- Sube a 3er lugar
 $ind_manager->register('zzvp',      $zzvp_ind);
+$ind_manager->register('liquidity', $liq_ind);
 $ind_manager->register('smc',       $smc_ind);   # <-- Baja a 4to lugar
 
 print "Calculando indicadores (ATR, Liquidity, SMC, ZigZag MTF/VP)...\n";
 $ind_manager->rebuild_all($market);
+
+my @levels = @{ $liq_ind->get_levels };
+my %by_state;
+$by_state{ $_->{state} }++ for @levels;
+print "Total niveles registrados: ", scalar(@levels), "\n";
+print "  por estado: ", join(", ", map { "$_=$by_state{$_}" } sort keys %by_state), "\n";
+
+my %by_class;
+$by_class{ $_->{classification} // "none" }++ for @levels;
+print "  por clasificacion: ", join(", ", map { "$_=$by_class{$_}" } sort keys %by_class), "\n";
+
 printf "ATR: %d  |  swings: %d  |  eventos liq: %d  |  eventos BOS/iBOS: %d  |  pivotes ZZMTF: %d  |  piernas ZZVP: %d\n",
     scalar @{ $ind_manager->get('atr') },
     scalar @{ $liq_ind->get_swings },
