@@ -145,6 +145,28 @@ sub reset {
     $self->{_trailing_last_top_idx} = undef;
     $self->{_trailing_last_bot_idx} = undef;
     $self->{_ob_mit_events} = [];
+
+    # --- FIX: faltaba limpiar el estado de Equal High/Low, FVG y Order
+    # Blocks al hacer reset(). Al cambiar de timeframe el motor se
+    # recalcula desde _c=[] pero estos arrays/pivotes seguian con datos
+    # del timeframe anterior, causando que las lineas EQH/EQL (y OB/FVG)
+    # viejas quedaran dibujadas superpuestas con las nuevas.
+    $self->{_leg_state_eq} = 0;
+    $self->{_prev_leg_eq}  = undef;
+    $_->{currentLevel} = undef, $_->{lastLevel} = undef, $_->{crossed} = 0, $_->{barIndex} = undef
+        for ( $self->{_equal_high}, $self->{_equal_low} );
+    $self->{_eq_events} = [];
+
+    $self->{_fvgs}         = [];
+    $self->{_active_fvgs}  = [];
+    $self->{_fvg_delta_cum} = 0;
+
+    $self->{_swing_obs}    = [];
+    $self->{_internal_obs} = [];
+    $self->{_tr_cum}       = 0;
+
+    $self->{_parsed_highs} = [];
+    $self->{_parsed_lows}  = [];
 }
 
 sub get_values { return []; }

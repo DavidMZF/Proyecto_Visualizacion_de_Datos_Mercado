@@ -144,6 +144,12 @@ my $ind_manager = Market::IndicatorManager->new;
 # EQH/EQL) y SMC_Structures necesita los swings ya confirmados por Liquidity.
 my $atr_ind = Market::Indicators::ATR->new(14);
 
+# ATR dedicado para SMC_Structures2: el Pine usa atrLenInp=200 (Advanced
+# Settings) tanto para el filtro de volatilidad (OB) como para el umbral
+# Equal High/Low (eqThreshInp * atrMeasure). Reutilizar el ATR(14) de
+# Liquidity aqui causaba EQH/EQL distintos a los de TradingView.
+my $atr200_ind = Market::Indicators::ATR->new(200);
+
 # ZigZag Multi Time Frame (direccion INTERNA): remuestrea a 30min por
 # defecto y corre un zigzag clasico por periodo, independiente de ATR.
 my $zzmtf_ind = Market::Indicators::ZigZagMTF->new(
@@ -182,10 +188,11 @@ my $smc_ind = Market::Indicators::SMC_Structures->new(
 
 # --- Ronda 2: motor SMC autonomo, replica fiel del Pine, sin ZigZag ---
 my $smc2_ind = Market::Indicators::SMC_Structures2->new(
-    atr => $atr_ind,   # reutiliza el ATR ya calculado (Equal H/L, Order Blocks)
+    atr => $atr200_ind,   # ATR(200), igual que atrLenInp del Pine (Equal H/L, Order Blocks)
 );
 
 $ind_manager->register('atr',       $atr_ind);
+$ind_manager->register('atr200',    $atr200_ind);
 $ind_manager->register('zzmtf',     $zzmtf_ind); # <-- Sube a 3er lugar
 $ind_manager->register('zzvp',      $zzvp_ind);
 $ind_manager->register('liquidity', $liq_ind);

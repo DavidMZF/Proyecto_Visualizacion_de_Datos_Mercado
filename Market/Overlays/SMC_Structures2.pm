@@ -261,11 +261,14 @@ sub _render_fvgs {
     my $plot_w = $scale->_plot_w;
 
     for my $f (@$fvgs) {
-        my $age = $last_known - $f->{created};
-        next if $age > $max_age && $f->{state} ne 'mitigated';
+        # FVG mitigado: desaparece de inmediato (igual que TradingView por
+        # defecto), en vez de seguir dibujandose atenuado.
+        next if $f->{state} eq 'mitigated';
 
-        my $right_idx = ( $f->{state} eq 'mitigated' && defined $f->{mitig_at} )
-            ? $f->{mitig_at} : $f->{created} + $max_age;
+        my $age = $last_known - $f->{created};
+        next if $age > $max_age;
+
+        my $right_idx = $f->{created} + $max_age;
         $right_idx = $last_known if $right_idx > $last_known;
 
         next if $right_idx      < $off;
@@ -279,7 +282,6 @@ sub _render_fvgs {
         $fresh      = 0 if $fresh < 0;
         my $base    = ( $f->{dir} eq 'bull' ) ? C_UP : C_DOWN;
         my $fill_op = 0.18 + 0.17 * $fresh;
-        $fill_op   *= 0.55 if $f->{state} eq 'mitigated';
         my $fill    = _mix( $base, $fill_op );
 
         my $x1 = $scale->index_to_center_x( $f->{idx_start} );
