@@ -31,6 +31,10 @@ use Market::Indicators::ZigZagVolumeProfile;
 use Market::Overlays::ZigZagMTF;
 use Market::Overlays::ZigZagVolumeProfile;
 
+# --- Ronda 2: motor SMC autonomo (sin ZigZag), leg()/trend propios ---
+use Market::Indicators::SMC_Structures2;
+use Market::Overlays::SMC_Structures2;
+
 # =============================================================================
 # VENTANA
 # =============================================================================
@@ -96,10 +100,10 @@ print "Cargando datos...\n";
 my $market = Market::MarketData->new;
 
 my $csv_path;
-for my $cand ("$Bin/data/2026_06_29.csv", "$Bin/2026_06_29.csv", "$Bin/../data/2026_06_29.csv") {
+for my $cand ("$Bin/data/2026_07_06.csv", "$Bin/2026_07_06.csv", "$Bin/../data/2026_07_06.csv") {
     if (-f $cand) { $csv_path = $cand; last; }
 }
-die "No se encuentra 2026_06_29.csv\n" unless $csv_path;
+die "No se encuentra 2026_07_06.csv\n" unless $csv_path;
 
 open my $fh, '<', $csv_path or die "Error abriendo CSV '$csv_path': $!\n";
 <$fh>;
@@ -176,11 +180,17 @@ my $smc_ind = Market::Indicators::SMC_Structures->new(
     max_age    => 50,
 );
 
+# --- Ronda 2: motor SMC autonomo, replica fiel del Pine, sin ZigZag ---
+my $smc2_ind = Market::Indicators::SMC_Structures2->new(
+    atr => $atr_ind,   # reutiliza el ATR ya calculado (Equal H/L, Order Blocks)
+);
+
 $ind_manager->register('atr',       $atr_ind);
 $ind_manager->register('zzmtf',     $zzmtf_ind); # <-- Sube a 3er lugar
 $ind_manager->register('zzvp',      $zzvp_ind);
 $ind_manager->register('liquidity', $liq_ind);
 $ind_manager->register('smc',       $smc_ind);   # <-- Baja a 4to lugar
+$ind_manager->register('smc2',      $smc2_ind);
 
 print "Calculando indicadores (ATR, Liquidity, SMC, ZigZag MTF/VP)...\n";
 $ind_manager->rebuild_all($market);
@@ -203,6 +213,13 @@ printf "ATR: %d  |  swings: %d  |  eventos liq: %d  |  eventos BOS/iBOS: %d  |  
     scalar @{ $zzmtf_ind->get_pivots },
     scalar @{ $zzvp_ind->get_profiles };
 
+printf "SMC2 (motor autonomo): eventos BOS/CHoCH: %d  |  FVGs: %d  |  EQH/EQL: %d  |  OB swing: %d  |  OB internal: %d\n",
+    scalar @{ $smc2_ind->get_events },
+    scalar @{ $smc2_ind->get_fvgs },
+    scalar @{ $smc2_ind->get_eq_events },
+    scalar @{ $smc2_ind->get_swing_order_blocks },
+    scalar @{ $smc2_ind->get_internal_order_blocks };
+
 # =============================================================================
 # OVERLAYS — gestor + overlays reales SMC y Liquidez (Tabla 1, Fase 2)
 # Cada overlay solo DIBUJA estructuras ya calculadas por su indicador fuente
@@ -211,10 +228,12 @@ printf "ATR: %d  |  swings: %d  |  eventos liq: %d  |  eventos BOS/iBOS: %d  |  
 # =============================================================================
 my $overlay_mgr = Market::OverlayManager->new;
 my $smc_overlay   = Market::Overlays::SMC_Structures->new( source => $smc_ind );
+my $smc2_overlay  = Market::Overlays::SMC_Structures2->new( source => $smc2_ind );
 my $liq_overlay   = Market::Overlays::Liquidity->new( source => $liq_ind, swing_source => $zzmtf_ind );
 my $zzmtf_overlay = Market::Overlays::ZigZagMTF->new( source => $zzmtf_ind );
 my $zzvp_overlay  = Market::Overlays::ZigZagVolumeProfile->new( source => $zzvp_ind );
 $overlay_mgr->register('smc',       $smc_overlay, visible => 0);
+$overlay_mgr->register('smc2',      $smc2_overlay, visible => 0);
 $overlay_mgr->register('liquidity', $liq_overlay, visible => 0);
 $overlay_mgr->register('zzmtf',     $zzmtf_overlay, visible => 0);
 $overlay_mgr->register('zzvp',      $zzvp_overlay, visible => 0);
@@ -655,6 +674,47 @@ $make_chk->($col_smc, 'BOS',         \$SMC{show_bos},   $leaf_smc);
 $make_chk->($col_smc, 'CHoCH',       \$SMC{show_choch}, $leaf_smc);
 $make_chk->($col_smc, 'FVG',         \$SMC{show_fvg},   $leaf_smc);
 $make_chk->($col_smc, 'HH/HL/LH/LL',\$SMC{show_hhll},  $leaf_smc);
+
+$tools_bar->Frame(-background => '#2a3445', -width => 1, -height => 16)
+    ->pack(-side => 'left', -pady => 4, -padx => 4);
+
+# =============================================================================
+# Columna SMC STRUCTURES 2 (motor autonomo, replica fiel del Pine, sin ZigZag)
+# =============================================================================
+my %SMC2 = (
+    show_bos => 0, show_choch => 0, show_fvg => 0, show_hhll => 0,
+    show_eq => 0, show_ob_swing => 0, show_ob_internal => 0,
+    show_trend_bars => 0, show_hl => 0, show_pd_zones => 0, show_mtf => 0,
+);
+my $smc2_master = 0;
+my $refresh_smc2 = sub {
+    $smc2_overlay->set_flag($_, $SMC2{$_}) for keys %SMC2;
+    my $any = 0; $any ||= $SMC2{$_} for keys %SMC2;
+    $overlay_mgr->set_visible('smc2', $any);
+    $engine->request_render;
+};
+my $sync_smc2_master = sub {
+    my $all = 1; $all &&= $SMC2{$_} for keys %SMC2;
+    $smc2_master = $all;
+};
+my $leaf_smc2 = sub { $refresh_smc2->(); $sync_smc2_master->(); };
+
+my $col_smc2 = $make_col->('SMC Structures 2', '#c9a24b');
+$make_chk->($col_smc2, 'Activar SMC2', \$smc2_master, sub {
+    $SMC2{$_} = $smc2_master for keys %SMC2;
+    $refresh_smc2->();
+});
+$make_chk->($col_smc2, 'BOS',            \$SMC2{show_bos},         $leaf_smc2);
+$make_chk->($col_smc2, 'CHoCH',          \$SMC2{show_choch},       $leaf_smc2);
+$make_chk->($col_smc2, 'FVG',            \$SMC2{show_fvg},         $leaf_smc2);
+$make_chk->($col_smc2, 'HH/HL/LH/LL',    \$SMC2{show_hhll},        $leaf_smc2);
+$make_chk->($col_smc2, 'EQH/EQL',        \$SMC2{show_eq},          $leaf_smc2);
+$make_chk->($col_smc2, 'OB Swing',       \$SMC2{show_ob_swing},    $leaf_smc2);
+$make_chk->($col_smc2, 'OB Internal',    \$SMC2{show_ob_internal}, $leaf_smc2);
+$make_chk->($col_smc2, 'Trend Bars',     \$SMC2{show_trend_bars},  $leaf_smc2);
+$make_chk->($col_smc2, 'Strong/Weak H-L',\$SMC2{show_hl},          $leaf_smc2);
+$make_chk->($col_smc2, 'Premium/Discount',\$SMC2{show_pd_zones},   $leaf_smc2);
+$make_chk->($col_smc2, 'MTF Levels',     \$SMC2{show_mtf},         $leaf_smc2);
 
 $tools_bar->Frame(-background => '#2a3445', -width => 1, -height => 16)
     ->pack(-side => 'left', -pady => 4, -padx => 4);

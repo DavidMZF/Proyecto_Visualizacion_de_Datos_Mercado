@@ -17,7 +17,7 @@ sub new {
     my $self = {
         # CAMBIO 1: Reemplazamos 'period' por 'deviation_pct'. 
         # Un 0.5% a 1.0% asegura que solo capte movimientos macro.
-        deviation_pct => $args{deviation_pct} // 1.5, 
+        deviation_pct => $args{deviation_pct} // 1, 
         bins          => $args{bins}          // 10,
         max_profiles  => $args{max_profiles}  // 15,
 

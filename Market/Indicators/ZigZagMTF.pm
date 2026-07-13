@@ -67,7 +67,7 @@ use warnings;
 sub new {
     my ( $class, %args ) = @_;
     my $self = {
-        resolution_minutes => $args{resolution_minutes} // 30,   # 15 | 30 | 60
+        resolution_minutes => $args{resolution_minutes} // 60,   # 15 | 30 | 60
         period             => $args{period}             // 2,    # ZigZag Period
 
         _c => [],   # velas base procesadas (temporalidad del grafico)
