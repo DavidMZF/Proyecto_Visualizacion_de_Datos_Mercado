@@ -328,6 +328,7 @@ sub render {
     $self->{_scale_atr} = $scale_atr;
 
     $self->{canvas_price}->delete('price_bg');
+    $self->{canvas_price}->delete('volume_bg');
     $self->{canvas_price}->delete('candle');
     $self->{canvas_price}->delete('scale_bg');
     $self->{canvas_price}->delete('scale_border');

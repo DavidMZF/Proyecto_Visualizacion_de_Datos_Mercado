@@ -16,6 +16,9 @@ use constant {
     COLOR_INFO     => '#1a1f29',
     BG_COLOR       => '#e8eaed',
     MIN_BODY_H     => 1,
+    VOL_BULL       => '#26a69a',
+    VOL_BEAR       => '#ef5350',
+    VOL_MAX_H_PCT  => 0.20,
 };
 
 sub new {
@@ -119,12 +122,54 @@ sub get_y_range {
     return ( $min_p - $margin, $max_p + $margin );
 }
 
+sub _render_volume {
+    my ( $self, $canvas, $data, $scale, $start_idx, $bar_w ) = @_;
+
+    my $max_vol = 0;
+    for my $c (@$data) {
+        my $v = $c->{volume} // $c->{Volume} // 0;
+        $max_vol = $v if $v > $max_vol;
+    }
+    return if $max_vol <= 0;
+
+    my $y_base = $scale->_plot_y_bottom;
+    my $max_h  = $scale->_plot_h * VOL_MAX_H_PCT;
+    my $body_w = $bar_w * 0.65;
+    $body_w = 1 if $body_w < 1;
+
+    for my $i ( 0 .. $#$data ) {
+        my $c   = $data->[$i];
+        my $vol = $c->{volume} // $c->{Volume} // 0;
+        next if $vol <= 0;
+
+        my $idx = $i + $start_idx;
+        my $cx  = $scale->index_to_center_x($idx);
+
+        my $h = ( $vol / $max_vol ) * $max_h;
+        $h = 1 if $h < 1;
+
+        my $bull  = ( $c->{close} >= $c->{open} );
+        my $color = $bull ? VOL_BULL : VOL_BEAR;
+
+        $canvas->createRectangle(
+            $cx - $body_w / 2, $y_base - $h,
+            $cx + $body_w / 2, $y_base,
+            -fill           => $color,
+            -outline        => $color,
+            -stipple        => 'gray50',
+            -outlinestipple => 'gray50',
+            -tags           => ['volume_bg'],
+        );
+    }
+}
+
 sub render {
     my ( $self, $canvas, $data, $scale ) = @_;
     return unless $data && @$data;
 
     $canvas->delete('candle');
     $canvas->delete('price_bg');
+    $canvas->delete('volume_bg');
 
     $canvas->createRectangle(
         0,                  0,
@@ -140,6 +185,11 @@ sub render {
     my $body_w = $bar_w * 0.65;
     $body_w = 1 if $body_w < 1;
     my $thin = ( $bar_w < 3 ) ? 1 : 0;
+
+    my $vol_start_idx = defined $scale->{slice_start}
+        ? $scale->{slice_start}
+        : ( $scale->{offset} < 0 ? 0 : $scale->{offset} );
+    $self->_render_volume( $canvas, $data, $scale, $vol_start_idx, $bar_w );
 
     # FIX: offset puede ser FRACCIONARIO (zoom anclado con Ctrl), pero el
     # array $data fue recortado en un indice ENTERO (slice_start). Usar
@@ -199,6 +249,8 @@ sub render {
             -tags => ['candle']
         );
     }
+
+    $canvas->raise('candle', 'volume_bg');
 }
 
 sub render_last_visible_price {
