@@ -260,6 +260,8 @@ my $smc2_overlay  = Market::Overlays::SMC_Structures2->new( source => $smc2_ind 
 my $liq_overlay   = Market::Overlays::Liquidity->new( source => $liq_ind, swing_source => $zzmtf_ind );
 my $zzmtf_overlay = Market::Overlays::ZigZagMTF->new( source => $zzmtf_ind );
 my $zzmtf2_overlay = Market::Overlays::ZigZagMTF2->new( source => $zzmtf2_ind );
+$zzmtf2_overlay->set_flag('show_zigzag', 0);
+$zzmtf2_overlay->set_flag('show_fibo',   0);
 my $zzvp_overlay  = Market::Overlays::ZigZagVolumeProfile->new( source => $zzvp_ind );
 my $zzvp2_overlay = Market::Overlays::ZigZagVolumeProfile2->new(
     source              => $zzvp2_ind,
@@ -579,17 +581,35 @@ $toolbar_left->Frame(-background => '#2a3445', -width => 1, -height => 16)
 # =============================================================================
 # ZIGZAG MTF v2 (con Fibonacci): activar + resolucion (junto a Velas: Opacas)
 # =============================================================================
-my $zzmtf2_on = 0;
-my $btn_zzmtf2;
-$btn_zzmtf2 = $toolbar_left->Button(%bs,
-    -text       => 'Zigzag MTF: Off',
+my $zzmtf2_zz_on   = 0;
+my $zzmtf2_fibo_on = 0;
+my $btn_zzmtf2_zz;
+my $btn_zzmtf2_fibo;
+$btn_zzmtf2_zz = $toolbar_left->Button(%bs,
+    -text       => 'Zigzag: Off',
     -foreground => '#00e676',
     -font       => 'TkDefaultFont 9 bold',
     -command    => sub {
-        $zzmtf2_on = !$zzmtf2_on;
-        $overlay_mgr->set_visible('zzmtf2', $zzmtf2_on);
-        $btn_zzmtf2->configure(
-            -text => $zzmtf2_on ? 'Zigzag MTF: On' : 'Zigzag MTF: Off',
+        $zzmtf2_zz_on = !$zzmtf2_zz_on;
+        $zzmtf2_overlay->set_flag('show_zigzag', $zzmtf2_zz_on);
+        $overlay_mgr->set_visible('zzmtf2', $zzmtf2_zz_on || $zzmtf2_fibo_on);
+        $btn_zzmtf2_zz->configure(
+            -text => $zzmtf2_zz_on ? 'Zigzag: On' : 'Zigzag: Off',
+        );
+        $engine->render;
+    },
+)->pack(-side => 'left', -padx => 4, -pady => 2);
+
+$btn_zzmtf2_fibo = $toolbar_left->Button(%bs,
+    -text       => 'Fibonacci: Off',
+    -foreground => '#2979ff',
+    -font       => 'TkDefaultFont 9 bold',
+    -command    => sub {
+        $zzmtf2_fibo_on = !$zzmtf2_fibo_on;
+        $zzmtf2_overlay->set_flag('show_fibo', $zzmtf2_fibo_on);
+        $overlay_mgr->set_visible('zzmtf2', $zzmtf2_zz_on || $zzmtf2_fibo_on);
+        $btn_zzmtf2_fibo->configure(
+            -text => $zzmtf2_fibo_on ? 'Fibonacci: On' : 'Fibonacci: Off',
         );
         $engine->render;
     },
@@ -606,7 +626,8 @@ my $zzmtf2_res_popup;
 my $zzmtf2_res_btn;
 my $close_zzmtf2_popup = sub {
     if ($zzmtf2_res_popup) {
-        $zzmtf2_res_popup->destroy;
+        $zzmtf2_res_popup->grabRelease if Tk::Exists($zzmtf2_res_popup);
+        $zzmtf2_res_popup->destroy if Tk::Exists($zzmtf2_res_popup);
         $zzmtf2_res_popup = undef;
     }
 };
@@ -654,8 +675,24 @@ $zzmtf2_res_btn = $toolbar_left->Button(%bs,
             )->pack(-fill => 'x');
         }
 
-        $zzmtf2_res_popup->bind('<FocusOut>', sub { $close_zzmtf2_popup->(); });
-        $zzmtf2_res_popup->focus;
+        # Asegurar que la ventana esta mapeada antes de pedir foco/grab,
+        # y usar grab para que los clicks no "atraviesen" a widgets de abajo.
+        $zzmtf2_res_popup->update;
+        $zzmtf2_res_popup->grab;
+        $zzmtf2_res_popup->focusForce;
+        $zzmtf2_res_popup->bind('<FocusOut>', sub {
+            # FocusOut tambien se dispara al hacer click en un boton hijo
+            # (otro widget); solo cerrar si el foco realmente salio
+            # de toda la jerarquia del popup.
+            $zzmtf2_res_popup->after(1, sub {
+                return unless $zzmtf2_res_popup;
+                my $focused = $zzmtf2_res_popup->focusCurrent;
+                unless ( $focused && Tk::Exists($focused)
+                    && "$focused" =~ /^\Q$zzmtf2_res_popup\E/ ) {
+                    $close_zzmtf2_popup->();
+                }
+            });
+        });
     },
 )->pack(-side => 'left', -padx => 4, -pady => 2);
 
