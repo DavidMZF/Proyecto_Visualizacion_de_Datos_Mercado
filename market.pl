@@ -28,8 +28,10 @@ use Market::Overlays::SMC_Structures;
 use Market::Overlays::Liquidity;
 use Market::Indicators::ZigZagMTF;
 use Market::Indicators::ZigZagVolumeProfile;
+use Market::Indicators::ZigZagVolumeProfile2;
 use Market::Overlays::ZigZagMTF;
 use Market::Overlays::ZigZagVolumeProfile;
+use Market::Overlays::ZigZagVolumeProfile2;
 
 # --- Ronda 2: motor SMC autonomo (sin ZigZag), leg()/trend propios ---
 use Market::Indicators::SMC_Structures2;
@@ -100,10 +102,10 @@ print "Cargando datos...\n";
 my $market = Market::MarketData->new;
 
 my $csv_path;
-for my $cand ("$Bin/data/2026_07_06.csv", "$Bin/2026_07_06.csv", "$Bin/../data/2026_07_06.csv") {
+for my $cand ("$Bin/data/2026_07_13.csv", "$Bin/2026_07_13.csv", "$Bin/../data/2026_07_13.csv") {
     if (-f $cand) { $csv_path = $cand; last; }
 }
-die "No se encuentra 2026_07_06.csv\n" unless $csv_path;
+die "No se encuentra 2026_07_13.csv\n" unless $csv_path;
 
 open my $fh, '<', $csv_path or die "Error abriendo CSV '$csv_path': $!\n";
 <$fh>;
@@ -167,6 +169,14 @@ my $zzvp_ind = Market::Indicators::ZigZagVolumeProfile->new(
     max_profiles => 15,
 );
 
+my $zzvp2_ind = Market::Indicators::ZigZagVolumeProfile2->new(
+    swing_length         => 600,   # sobre velas 1m: ~10h por ventana, zigzag macro
+    channel_width_factor => 1,
+    atr_period           => 200,
+    volume_bin_count     => 5,
+    max_profiles         => 15,
+);
+
 my $liq_ind = Market::Indicators::Liquidity->new(
     atr        => $atr_ind,
     zzmtf      => $zzmtf_ind,   
@@ -195,6 +205,7 @@ $ind_manager->register('atr',       $atr_ind);
 $ind_manager->register('atr200',    $atr200_ind);
 $ind_manager->register('zzmtf',     $zzmtf_ind); # <-- Sube a 3er lugar
 $ind_manager->register('zzvp',      $zzvp_ind);
+$ind_manager->register('zzvp2',     $zzvp2_ind);
 $ind_manager->register('liquidity', $liq_ind);
 $ind_manager->register('smc',       $smc_ind);   # <-- Baja a 4to lugar
 $ind_manager->register('smc2',      $smc2_ind);
@@ -239,11 +250,19 @@ my $smc2_overlay  = Market::Overlays::SMC_Structures2->new( source => $smc2_ind 
 my $liq_overlay   = Market::Overlays::Liquidity->new( source => $liq_ind, swing_source => $zzmtf_ind );
 my $zzmtf_overlay = Market::Overlays::ZigZagMTF->new( source => $zzmtf_ind );
 my $zzvp_overlay  = Market::Overlays::ZigZagVolumeProfile->new( source => $zzvp_ind );
+my $zzvp2_overlay = Market::Overlays::ZigZagVolumeProfile2->new(
+    source              => $zzvp2_ind,
+    show_zigzag         => 1,
+    show_channel        => 0,   # lineas guia paralelas (ruido tipo abanico)
+    show_volume_profile => 0,   # barras de volumen por nivel + etiquetas %
+    show_poc            => 0,
+);
 $overlay_mgr->register('smc',       $smc_overlay, visible => 0);
 $overlay_mgr->register('smc2',      $smc2_overlay, visible => 0);
 $overlay_mgr->register('liquidity', $liq_overlay, visible => 0);
 $overlay_mgr->register('zzmtf',     $zzmtf_overlay, visible => 0);
 $overlay_mgr->register('zzvp',      $zzvp_overlay, visible => 0);
+$overlay_mgr->register('zzvp2',     $zzvp2_overlay, visible => 0);
 
 # =============================================================================
 # PANELES Y MOTOR
@@ -542,6 +561,7 @@ $btn_candle_opacity = $toolbar_left->Button(%bs,
     },
 )->pack(-side => 'left', -padx => 4, -pady => 2);
 
+
 # =============================================================================
 # DRAG DEL SEPARADOR ATR
 # =============================================================================
@@ -743,30 +763,14 @@ $tools_bar->Frame(-background => '#2a3445', -width => 1, -height => 16)
     ->pack(-side => 'left', -pady => 4, -padx => 4);
 
 # =============================================================================
-# Columna ZIGZAG VOLUME PROFILE (direccion EXTERNA) — zigzag mayor grado + POC
+# Columna ZIGZAG VOLUME PROFILE (direccion EXTERNA) — ahora usa ZZVP2
 # =============================================================================
-my %ZZVP = ( show_zigzag => 0, show_volume_profile => 0, show_poc => 0 );
-my $zzvp_master = 0;
-my $refresh_zzvp = sub {
-    $zzvp_overlay->set_flag($_, $ZZVP{$_}) for keys %ZZVP;
-    my $any = ( $ZZVP{show_zigzag} || $ZZVP{show_volume_profile} || $ZZVP{show_poc} ) ? 1 : 0;
-    $overlay_mgr->set_visible('zzvp', $any);
-    $engine->request_render;
-};
-my $sync_zzvp_master = sub {
-    $zzvp_master =
-        ( $ZZVP{show_zigzag} && $ZZVP{show_volume_profile} && $ZZVP{show_poc} ) ? 1 : 0;
-};
-my $leaf_zzvp = sub { $refresh_zzvp->(); $sync_zzvp_master->(); };
-
 my $col_zzvp = $make_col->('ZigZag Volume Profile (Externa)', '#7e57c2');
-$make_chk->($col_zzvp, 'Activar ZZVP', \$zzvp_master, sub {
-    $ZZVP{$_} = $zzvp_master for keys %ZZVP;
-    $refresh_zzvp->();
+my $zzvp2_on = 0;
+$make_chk->($col_zzvp, 'Activar Zigzag Volumen', \$zzvp2_on, sub {
+    $overlay_mgr->set_visible('zzvp2', $zzvp2_on);
+    $engine->request_render;
 });
-$make_chk->($col_zzvp, 'ZigZag Externo', \$ZZVP{show_zigzag},         $leaf_zzvp);
-$make_chk->($col_zzvp, 'Volume Profile', \$ZZVP{show_volume_profile}, $leaf_zzvp);
-$make_chk->($col_zzvp, 'POC',            \$ZZVP{show_poc},            $leaf_zzvp);
 
 $tools_bar->Frame(-background => '#2a3445', -width => 1, -height => 16)
     ->pack(-side => 'left', -pady => 4, -padx => 4);
