@@ -314,14 +314,29 @@ my ( $replay_status_lbl, $btn_replay_play, $btn_replay_pause,
      $btn_replay_exit );
 
 my $replay;
+my $_replay_was_active = 0;   # para detectar la transicion inactivo->activo/activo->inactivo
 $replay = Market::Replay->new(
     market     => $market,
     indicators => $ind_manager,
     schedule   => sub { $canvas_price->after(@_); },
     on_change  => sub {
-        $engine->follow_replay_pointer;
+        my $active = $replay->is_active;
 
-        my $active  = $replay->is_active;
+        if ( $active && !$_replay_was_active ) {
+            # Recien arranco el replay: posicionar con margen de 2 velas
+            # en blanco a la derecha (efecto "tiempo real").
+            $engine->position_replay_pointer;
+        } elsif ( !$active && $_replay_was_active ) {
+            # Se salio del replay: volver al comportamiento normal EN VIVO.
+            $engine->follow_replay_pointer;
+        } else {
+            # Paso normal (forward/backward/play/pause): NO tocar la
+            # camara, solo redibujar para que la vela nueva entre en
+            # el lienzo ya posicionado por el usuario.
+            $engine->request_render;
+        }
+        $_replay_was_active = $active;
+
         my $playing = $replay->is_playing;
 
         if ($replay_status_lbl) {
@@ -805,36 +820,6 @@ my $make_chk = sub {
     $cb->pack(-side => 'left', -anchor => 'w', -padx => 2);
     return $cb;
 };
-
-# =============================================================================
-# Columna SMC STRUCTURES (BOS / iBOS)
-# =============================================================================
-my %SMC = ( show_bos => 0, show_choch => 0, show_fvg => 0, show_hhll => 0 );
-my $smc_master = 0;
-my $refresh_smc = sub {
-    $smc_overlay->set_flag($_, $SMC{$_}) for keys %SMC;
-    my $any = 0; $any ||= $SMC{$_} for keys %SMC;
-    $overlay_mgr->set_visible('smc', $any);
-    $engine->request_render;
-};
-my $sync_smc_master = sub {
-    my $all = 1; $all &&= $SMC{$_} for keys %SMC;
-    $smc_master = $all;
-};
-my $leaf_smc = sub { $refresh_smc->(); $sync_smc_master->(); };
-
-my $col_smc = $make_col->('SMC Structures', '#4f8cff');
-$make_chk->($col_smc, 'Activar SMC', \$smc_master, sub {
-    $SMC{$_} = $smc_master for keys %SMC;   # master = encender/apagar TODO SMC
-    $refresh_smc->();
-});
-$make_chk->($col_smc, 'BOS',         \$SMC{show_bos},   $leaf_smc);
-$make_chk->($col_smc, 'CHoCH',       \$SMC{show_choch}, $leaf_smc);
-$make_chk->($col_smc, 'FVG',         \$SMC{show_fvg},   $leaf_smc);
-$make_chk->($col_smc, 'HH/HL/LH/LL',\$SMC{show_hhll},  $leaf_smc);
-
-$tools_bar->Frame(-background => '#2a3445', -width => 1, -height => 16)
-    ->pack(-side => 'left', -pady => 4, -padx => 4);
 
 # =============================================================================
 # Columna SMC STRUCTURES 2 (motor autonomo, replica fiel del Pine, sin ZigZag)

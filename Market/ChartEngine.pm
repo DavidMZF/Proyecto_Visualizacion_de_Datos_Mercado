@@ -1265,6 +1265,16 @@ sub follow_replay_pointer {
     $self->request_render;
 }
 
+sub position_replay_pointer {
+    my ($self) = @_;
+    my $total = $self->{market}->size;
+    return if $total <= 0;
+
+    my $margin = 2;   # velas visibles en blanco a la derecha del puntero
+    $self->{offset} = $total - $self->{visible_bars} + $margin;
+    $self->request_render;
+}
+
 sub compute_intraday_labels {
     my ( $self, $start, $end ) = @_;
 
