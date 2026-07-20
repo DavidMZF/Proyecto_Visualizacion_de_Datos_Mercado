@@ -38,6 +38,8 @@ use Market::Indicators::AnchoredVolumeProfile;
 use Market::Overlays::AnchoredVolumeProfile;
 use Market::Indicators::AnchoredVWAP;
 use Market::Overlays::AnchoredVWAP;
+use Market::Indicators::PivotAnchors;
+use Market::Overlays::PivotAnchors;
 
 # --- Ronda 2: motor SMC autonomo (sin ZigZag), leg()/trend propios ---
 use Market::Indicators::SMC_Structures2;
@@ -227,6 +229,10 @@ my $avwap_ind = Market::Indicators::AnchoredVWAP->new(
     band_mult    => [ 1, 2, 3 ],
 );
 
+my $pivot_anchors_ind = Market::Indicators::PivotAnchors->new(
+    pivot_length => 50,
+);
+
 $ind_manager->register('atr',       $atr_ind);
 $ind_manager->register('atr200',    $atr200_ind);
 $ind_manager->register('zzmtf',     $zzmtf_ind); # <-- Sube a 3er lugar
@@ -238,6 +244,7 @@ $ind_manager->register('smc',       $smc_ind);   # <-- Baja a 4to lugar
 $ind_manager->register('smc2',      $smc2_ind);
 $ind_manager->register('avp',       $avp_ind);
 $ind_manager->register('avwap', $avwap_ind);
+$ind_manager->register('pivot_anchors', $pivot_anchors_ind);
 
 print "Calculando indicadores (ATR, Liquidity, SMC, ZigZag MTF/VP)...\n";
 $ind_manager->rebuild_all($market);
@@ -291,6 +298,7 @@ my $zzvp2_overlay = Market::Overlays::ZigZagVolumeProfile2->new(
 );
 my $avp_overlay = Market::Overlays::AnchoredVolumeProfile->new( source => $avp_ind );
 my $avwap_overlay = Market::Overlays::AnchoredVWAP->new( source => $avwap_ind );
+my $pivot_anchors_overlay = Market::Overlays::PivotAnchors->new( source => $pivot_anchors_ind );
 
 $overlay_mgr->register('smc',       $smc_overlay, visible => 0);
 $overlay_mgr->register('smc2',      $smc2_overlay, visible => 0);
@@ -301,6 +309,7 @@ $overlay_mgr->register('zzvp',      $zzvp_overlay, visible => 0);
 $overlay_mgr->register('zzvp2',     $zzvp2_overlay, visible => 0);
 $overlay_mgr->register('avp',       $avp_overlay, visible => 0);
 $overlay_mgr->register('avwap', $avwap_overlay, visible => 0);
+$overlay_mgr->register('pivot_anchors', $pivot_anchors_overlay, visible => 0);
 
 # =============================================================================
 # PANELES Y MOTOR
@@ -890,6 +899,17 @@ $make_chk->($col_smc2, 'MTF Levels',     \$SMC2{show_mtf},         $leaf_smc2);
 $tools_bar->Frame(-background => '#2a3445', -width => 1, -height => 16)
     ->pack(-side => 'left', -pady => 4, -padx => 4);
 
+# =============================================================================
+# Toggle de anclas
+# =============================================================================
+
+my $pivot_anchors_master = 0;
+my $col_pivots = $make_col->('Pivot Anchors (candidatas)', '#8899aa');
+$make_chk->($col_pivots, 'Mostrar pivotes', \$pivot_anchors_master, sub {
+    $pivot_anchors_overlay->set_flag('show', $pivot_anchors_master);
+    $overlay_mgr->set_visible('pivot_anchors', $pivot_anchors_master);
+    $engine->request_render;
+});
 # =============================================================================
 # Columna ANCHORED VOLUME PROFILE (auto/manual)
 # =============================================================================
