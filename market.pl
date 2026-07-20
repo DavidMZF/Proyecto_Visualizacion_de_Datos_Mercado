@@ -840,7 +840,9 @@ $tools_bar->Frame(-background => '#2a3445', -width => 1, -height => 16)
 # Columna SMC STRUCTURES 2 (motor autonomo, replica fiel del Pine, sin ZigZag)
 # =============================================================================
 my %SMC2 = (
-    show_bos => 0, show_choch => 0, show_fvg => 0, show_hhll => 0,
+    show_bos_swing => 0, show_bos_internal => 0,
+    show_choch_swing => 0, show_choch_internal => 0,
+    show_fvg => 0, show_hhll => 0,
     show_eq => 0, show_ob_swing => 0, show_ob_internal => 0,
     show_trend_bars => 0, show_hl => 0, show_pd_zones => 0, show_mtf => 0,
 );
@@ -862,8 +864,10 @@ $make_chk->($col_smc2, 'Activar SMC2', \$smc2_master, sub {
     $SMC2{$_} = $smc2_master for keys %SMC2;
     $refresh_smc2->();
 });
-$make_chk->($col_smc2, 'BOS',            \$SMC2{show_bos},         $leaf_smc2);
-$make_chk->($col_smc2, 'CHoCH',          \$SMC2{show_choch},       $leaf_smc2);
+$make_chk->($col_smc2, 'BOS (swing)',    \$SMC2{show_bos_swing},    $leaf_smc2);
+$make_chk->($col_smc2, 'BOS (interno)',  \$SMC2{show_bos_internal}, $leaf_smc2);
+$make_chk->($col_smc2, 'CHoCH (swing)',  \$SMC2{show_choch_swing},    $leaf_smc2);
+$make_chk->($col_smc2, 'CHoCH (interno)',\$SMC2{show_choch_internal}, $leaf_smc2);
 $make_chk->($col_smc2, 'FVG',            \$SMC2{show_fvg},         $leaf_smc2);
 $make_chk->($col_smc2, 'HH/HL/LH/LL',    \$SMC2{show_hhll},        $leaf_smc2);
 $make_chk->($col_smc2, 'EQH/EQL',        \$SMC2{show_eq},          $leaf_smc2);

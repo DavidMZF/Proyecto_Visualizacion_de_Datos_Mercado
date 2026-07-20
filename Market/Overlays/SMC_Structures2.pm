@@ -16,7 +16,8 @@ package Market::Overlays::SMC_Structures2;
 #     iguales + chip centrado) y Order Blocks (rectangulo desde la vela de
 #     origen hasta el borde derecho visible, un color por bias).
 #
-# Sub-toggles independientes: show_bos, show_choch, show_fvg, show_hhll,
+# Sub-toggles independientes: show_bos_swing, show_bos_internal,
+# show_choch_swing, show_choch_internal, show_fvg, show_hhll,
 # show_eq, show_ob_swing, show_ob_internal.
 # =============================================================================
 
@@ -41,8 +42,10 @@ sub new {
     my ( $class, %args ) = @_;
     my $self = {
         source           => $args{source},
-        show_bos         => $args{show_bos}         // 1,
-        show_choch       => $args{show_choch}       // 1,
+        show_bos_swing      => $args{show_bos_swing}      // 1,
+        show_bos_internal   => $args{show_bos_internal}   // 1,
+        show_choch_swing    => $args{show_choch_swing}    // 1,
+        show_choch_internal => $args{show_choch_internal} // 1,
         show_fvg         => $args{show_fvg}         // 1,
         show_hhll        => $args{show_hhll}        // 1,
         show_eq          => $args{show_eq}          // 1,
@@ -120,7 +123,8 @@ sub render {
     $self->_render_eq( $canvas, $scale, $src, \@placed )
         if $self->{show_eq} && $src->can('get_eq_events');
     $self->_render_events( $canvas, $scale, $src, \@placed )
-        if $self->{show_bos} || $self->{show_choch};
+        if $self->{show_bos_swing} || $self->{show_bos_internal}
+        || $self->{show_choch_swing} || $self->{show_choch_internal};
     $self->_render_swing_labels( $canvas, $scale, $src, \@placed )
         if $self->{show_hhll} && $src->can('get_swing_labels');
     $self->_render_trend_bars( $canvas, $scale, $src )
@@ -384,8 +388,13 @@ sub _render_events {
 
         my $is_choch    = ( ( $e->{type}  // '' ) eq 'CHoCH' );
         my $is_internal = ( ( $e->{scope} // 'swing' ) eq 'internal' );
-        next if  $is_choch              && !$self->{show_choch};
-        next if !$is_choch              && !$self->{show_bos};
+        if ($is_choch) {
+            next if  $is_internal && !$self->{show_choch_internal};
+            next if !$is_internal && !$self->{show_choch_swing};
+        } else {
+            next if  $is_internal && !$self->{show_bos_internal};
+            next if !$is_internal && !$self->{show_bos_swing};
+        }
 
         if ( $self->{mode} eq 'present' ) {
             my $key = ( $e->{scope} // 'swing' ) . '|' . ( $e->{dir} // 'up' );
@@ -424,7 +433,7 @@ sub _render_events {
 
         $canvas->createLine( $x1, $y, $x2, $y,
             -fill => $color, -width => $width,
-            ( $is_choch || $is_internal ? ( -dash => [5,3] ) : () ),
+            ( $is_internal ? ( -dash => [5,3] ) : () ),
             -tags => [TAG] );
         my $up = ( $dir eq 'up' );
         my $label;
