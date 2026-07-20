@@ -283,13 +283,22 @@ sub _accumulate_candle {
         if ($is_buy) { $slot->{buy}  += $vol_per_bin; }
         else         { $slot->{sell} += $vol_per_bin; }
         $slot->{total} += $vol_per_bin;
-
-        if ( !defined $self->{_poc_bin}
-            || $slot->{total} > $self->{_bins}{ $self->{_poc_bin} }{total} )
-        {
-            $self->{_poc_bin} = $b;
-        }
     }
     $self->{_total_volume} += $vol;
+
+    # NUEVO: recalculo GLOBAL del POC tras cada vela acumulada, comparando
+    # el total real de TODOS los bins -- no solo los tocados en este paso.
+    # Esto evita que el POC quede "congelado" en un bin que dejo de
+    # recibir volumen nuevo mientras otro bin sigue creciendo por detras.
+    my $poc_bin  = undef;
+    my $poc_tot  = -1;
+    for my $b ( keys %{ $self->{_bins} } ) {
+        my $t = $self->{_bins}{$b}{total};
+        if ( $t > $poc_tot ) {
+            $poc_tot = $t;
+            $poc_bin = $b;
+        }
+    }
+    $self->{_poc_bin} = $poc_bin;
 }
 1;

@@ -216,7 +216,7 @@ my $avp_ind = Market::Indicators::AnchoredVolumeProfile->new(
     mode         => 'auto',
     pivot_length => 50,   # ta.pivothigh/low(length,length), igual criterio LuxAlgo
     atr_period   => 50,
-    bin_atr_mult => 1.0,
+    bin_atr_mult => 0.5,
 );
 
 $ind_manager->register('atr',       $atr_ind);

@@ -1,19 +1,5 @@
 package Market::Overlays::AnchoredVolumeProfile;
 
-# =============================================================================
-# Market::Overlays::AnchoredVolumeProfile
-#
-# Dibuja el histograma horizontal (docked al lienzo en blanco a la derecha
-# de la ultima vela conocida, igual zona que dejo libre el fix de Replay).
-# Cada bin es una barra apilada compra(cyan)/venta(rosa); el bin POC se
-# resalta con contorno propio + linea de precio punteada que cruza todo el
-# ancho del histograma (con etiqueta de precio), igual criterio visual que
-# ya usa el proyecto para lineas POC (Overlays::ZigZagVolumeProfile2).
-#
-# NO calcula nada: lee get_profile()/get_anchor_index() de
-# Indicators::AnchoredVolumeProfile.
-# =============================================================================
-
 use strict;
 use warnings;
 
@@ -21,12 +7,12 @@ use constant TAG        => 'overlay_avp';
 use constant TAG_LABELS => 'overlay_avp_labels';
 
 use constant {
-    C_BUY       => '#26a69a',   # volumen comprador (velas alcistas)
-    C_SELL      => '#ef5350',   # volumen vendedor (velas bajistas)
-    C_POC       => '#ffd700',   # linea/():contorno del bin de mayor volumen
-    C_ANCHOR    => '#4f8cff',   # marca vertical del punto de ancla
-    MAX_WIDTH_FRACTION => 0.45,  # tope del histograma: fraccion del ancho del plot
-    MIN_BAR_H          => 2,     # alto minimo dibujable de una barra (px)
+    C_BUY       => '#26a69a',
+    C_SELL      => '#ef5350',
+    C_POC       => '#000000',
+    C_ANCHOR    => '#4f8cff',
+    MAX_WIDTH_FRACTION => 0.22,
+    MIN_BAR_H          => 2,
 };
 
 sub tag         { return TAG; }
@@ -58,26 +44,17 @@ sub render {
     my $bins = $profile->{bins};
     return unless $bins && @$bins;
 
-    my $anchor_idx = $profile->{anchor_index};
-    my $last_idx   = $src->processed_last;
+    my $anchor_idx   = $profile->{anchor_index};
+    my $anchor_price = $profile->{anchor_price};
+    my $plot_w       = $scale->_plot_w;
 
-    # Baseline: borde derecho de la ultima vela conocida (arranque del
-    # "lienzo en blanco" -- misma zona que deja libre el fix de Replay).
-    my $baseline_x = $scale->index_to_center_x($last_idx);
-    my $plot_w     = $scale->_plot_w;
-
-    # Si la ultima vela conocida quedo fuera de pantalla (usuario scrolleo
-    # lejos en el historico), el docking a la derecha no tiene sentido visual.
-    return if $baseline_x < 0 || $baseline_x > $plot_w;
-
-    my $max_bar_w = ( $plot_w - $baseline_x );
-    my $cap       = $plot_w * MAX_WIDTH_FRACTION;
-    $max_bar_w = $cap if $max_bar_w > $cap;
+    my $max_bar_w  = $plot_w * MAX_WIDTH_FRACTION;
     return if $max_bar_w <= 1;
 
-    my $max_total = $profile->{max_total} || 1;
+    my $baseline_x = $plot_w - $max_bar_w;
+    my $max_total  = $profile->{max_total} || 1;
 
-    # --- Marca vertical del ancla (si esta en pantalla) ---
+    # --- Marca vertical del ancla + puntito en el precio de ancla ---
     if ( defined $anchor_idx ) {
         my $ax = $scale->index_to_center_x($anchor_idx);
         if ( $ax >= 0 && $ax <= $plot_w ) {
@@ -86,6 +63,15 @@ sub render {
                 -fill => C_ANCHOR, -width => 1, -dash => [ 3, 3 ],
                 -tags => [TAG],
             );
+            if ( defined $anchor_price ) {
+                my $ay = $scale->value_to_y($anchor_price);
+                my $r  = 6;   # antes 4 -- mas grande para que se note bien
+                $canvas->createOval(
+                    $ax - $r, $ay - $r, $ax + $r, $ay + $r,
+                    -fill => C_ANCHOR, -outline => '#ffffff', -width => 2,
+                    -tags => [TAG],
+                );
+            }
             $canvas->createText(
                 $ax + 4, $scale->_plot_y_top + 10,
                 -text => 'AVP', -anchor => 'w', -fill => C_ANCHOR,
@@ -94,7 +80,15 @@ sub render {
         }
     }
 
-    # --- Barras por bin ---
+    my $bin_gap = 1;
+
+    my ($poc_bin_data) = grep { $_->{is_poc} } @$bins;
+    my $poc_price_mid;
+    $poc_price_mid = ( $poc_bin_data->{price_lo} + $poc_bin_data->{price_hi} ) / 2
+        if $poc_bin_data;
+
+    my ( $poc_x1, $poc_x2, $poc_y1, $poc_y2 );
+
     for my $b (@$bins) {
         next unless $scale->value_in_range( $b->{price_lo} )
                  || $scale->value_in_range( $b->{price_hi} )
@@ -106,45 +100,53 @@ sub render {
         ( $y1, $y2 ) = ( $y2, $y1 ) if $y1 > $y2;
         next if ( $y2 - $y1 ) < MIN_BAR_H;
 
-        my $bar_len  = ( $b->{total} / $max_total ) * $max_bar_w;
+        my ( $yy1, $yy2 ) = ( $y1, $y2 );
+        if ( ( $yy2 - $yy1 ) > ( 2 * $bin_gap + MIN_BAR_H ) ) {
+            $yy1 += $bin_gap;
+            $yy2 -= $bin_gap;
+        }
+
+        my $bar_len = ( $b->{total} / $max_total ) * $max_bar_w;
         next if $bar_len <= 0;
 
-        my $buy_len  = $b->{total} > 0 ? ( $b->{buy} / $b->{total} ) * $bar_len : 0;
+        my $buy_len  = $b->{total} > 0 ? ( $b->{buy}  / $b->{total} ) * $bar_len : 0;
         my $sell_len = $bar_len - $buy_len;
 
-        my $x1 = $baseline_x;
-        my $x2 = $x1 + $buy_len;
-        my $x3 = $x2 + $sell_len;
+        my $x3 = $plot_w;
+        my $x2 = $x3 - $sell_len;
+        my $x1 = $x2 - $buy_len;
 
-        $canvas->createRectangle( $x1, $y1, $x2, $y2,
+        $canvas->createRectangle( $x1, $yy1, $x2, $yy2,
             -fill => C_BUY, -outline => C_BUY, -width => 0, -tags => [TAG] )
             if $buy_len > 0;
-        $canvas->createRectangle( $x2, $y1, $x3, $y2,
+        $canvas->createRectangle( $x2, $yy1, $x3, $yy2,
             -fill => C_SELL, -outline => C_SELL, -width => 0, -tags => [TAG] )
             if $sell_len > 0;
 
         if ( $b->{is_poc} ) {
-            $canvas->createRectangle( $x1, $y1, $x3, $y2,
-                -fill => '', -outline => C_POC, -width => 2, -tags => [TAG] );
+            $poc_x1 = $x1;
+            $poc_x2 = $x3;
+            $poc_y1 = $yy1;
+            $poc_y2 = $yy2;
         }
     }
 
-    # --- Linea + etiqueta del POC (cruza todo el ancho del histograma) ---
-    my ($poc) = grep { $_->{is_poc} } @$bins;
-    if ($poc) {
-        my $py = $scale->value_to_y( ( $poc->{price_lo} + $poc->{price_hi} ) / 2 );
+    if ( defined $poc_x1 ) {
+        $canvas->createRectangle( $poc_x1, $poc_y1, $poc_x2, $poc_y2,
+            -fill => '', -outline => C_POC, -width => 2, -tags => [TAG] );
+    }
+
+
+    if ( defined $poc_price_mid && $scale->value_in_range($poc_price_mid) ) {
+        my $py = $scale->value_to_y($poc_price_mid);
         $canvas->createLine(
-            $baseline_x, $py, $baseline_x + $max_bar_w, $py,
-            -fill => C_POC, -width => 1, -dash => [ 4, 2 ], -tags => [TAG],
-        );
-        my $mid_price = ( $poc->{price_lo} + $poc->{price_hi} ) / 2;
-        $canvas->createText(
-            $baseline_x + $max_bar_w + 4, $py,
-            -text   => sprintf( '%.2f', $mid_price ),
-            -anchor => 'w', -fill => C_POC,
-            -font   => 'TkDefaultFont 8 bold', -tags => [ TAG, TAG_LABELS ],
+            0, $py, $plot_w, $py,
+            -fill => C_POC, -width => 2, -dash => [ 6, 3 ], -tags => [TAG],
         );
     }
+
+    $canvas->raise(TAG);
+    $canvas->raise(TAG_LABELS);
 }
 
 1;
