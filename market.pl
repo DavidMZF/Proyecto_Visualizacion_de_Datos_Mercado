@@ -34,6 +34,8 @@ use Market::Overlays::ZigZagMTF;
 use Market::Overlays::ZigZagMTF2;
 use Market::Overlays::ZigZagVolumeProfile;
 use Market::Overlays::ZigZagVolumeProfile2;
+use Market::Indicators::AnchoredVolumeProfile;
+use Market::Overlays::AnchoredVolumeProfile;
 
 # --- Ronda 2: motor SMC autonomo (sin ZigZag), leg()/trend propios ---
 use Market::Indicators::SMC_Structures2;
@@ -210,6 +212,13 @@ my $smc2_ind = Market::Indicators::SMC_Structures2->new(
     atr => $atr200_ind,   # ATR(200), igual que atrLenInp del Pine (Equal H/L, Order Blocks)
 );
 
+my $avp_ind = Market::Indicators::AnchoredVolumeProfile->new(
+    mode         => 'auto',
+    pivot_length => 50,   # ta.pivothigh/low(length,length), igual criterio LuxAlgo
+    atr_period   => 50,
+    bin_atr_mult => 1.0,
+);
+
 $ind_manager->register('atr',       $atr_ind);
 $ind_manager->register('atr200',    $atr200_ind);
 $ind_manager->register('zzmtf',     $zzmtf_ind); # <-- Sube a 3er lugar
@@ -219,6 +228,7 @@ $ind_manager->register('zzvp2',     $zzvp2_ind);
 $ind_manager->register('liquidity', $liq_ind);
 $ind_manager->register('smc',       $smc_ind);   # <-- Baja a 4to lugar
 $ind_manager->register('smc2',      $smc2_ind);
+$ind_manager->register('avp',       $avp_ind);
 
 print "Calculando indicadores (ATR, Liquidity, SMC, ZigZag MTF/VP)...\n";
 $ind_manager->rebuild_all($market);
@@ -270,6 +280,8 @@ my $zzvp2_overlay = Market::Overlays::ZigZagVolumeProfile2->new(
     show_volume_profile => 0,   # barras de volumen por nivel + etiquetas %
     show_poc            => 0,
 );
+my $avp_overlay = Market::Overlays::AnchoredVolumeProfile->new( source => $avp_ind );
+
 $overlay_mgr->register('smc',       $smc_overlay, visible => 0);
 $overlay_mgr->register('smc2',      $smc2_overlay, visible => 0);
 $overlay_mgr->register('liquidity', $liq_overlay, visible => 0);
@@ -277,6 +289,7 @@ $overlay_mgr->register('zzmtf',     $zzmtf_overlay, visible => 0);
 $overlay_mgr->register('zzmtf2',    $zzmtf2_overlay, visible => 0);
 $overlay_mgr->register('zzvp',      $zzvp_overlay, visible => 0);
 $overlay_mgr->register('zzvp2',     $zzvp2_overlay, visible => 0);
+$overlay_mgr->register('avp',       $avp_overlay, visible => 0);
 
 # =============================================================================
 # PANELES Y MOTOR
@@ -865,6 +878,53 @@ $make_chk->($col_smc2, 'MTF Levels',     \$SMC2{show_mtf},         $leaf_smc2);
 
 $tools_bar->Frame(-background => '#2a3445', -width => 1, -height => 16)
     ->pack(-side => 'left', -pady => 4, -padx => 4);
+
+# =============================================================================
+# Columna ANCHORED VOLUME PROFILE (auto/manual)
+# =============================================================================
+my $avp_master = 0;
+my $refresh_avp = sub {
+    $avp_overlay->set_flag('show', $avp_master);
+    $overlay_mgr->set_visible('avp', $avp_master);
+    $engine->request_render;
+};
+
+my $col_avp = $make_col->('Anchored Volume Profile', '#ffd700');
+$make_chk->($col_avp, 'Activar AVP', \$avp_master, $refresh_avp);
+
+my $btn_avp_auto;
+my $btn_avp_manual;
+$btn_avp_auto = $col_avp->Button(%bs,
+    -text    => 'Auto',
+    -font    => 'TkDefaultFont 8 bold',
+    -foreground => '#26a69a',
+    -command => sub {
+        $avp_ind->set_mode('auto');
+        $btn_avp_auto->configure(-foreground => '#26a69a');
+        $btn_avp_manual->configure(-foreground => '#1a1f29');
+        $engine->set_avp_select_mode(0);
+        $engine->request_render;
+    },
+)->pack(-side => 'left', -padx => 2);
+
+$btn_avp_manual = $col_avp->Button(%bs,
+    -text    => 'Manual: clic vela',
+    -font    => 'TkDefaultFont 8 bold',
+    -foreground => '#1a1f29',
+    -command => sub {
+        $avp_ind->set_mode('manual');
+        $btn_avp_auto->configure(-foreground => '#1a1f29');
+        $btn_avp_manual->configure(-foreground => '#ef5350');
+        $engine->set_avp_select_mode(1);   # queda armado para el proximo clic
+    },
+)->pack(-side => 'left', -padx => 2);
+
+$engine->set_avp_click_cb(sub {
+    my ($idx) = @_;
+    $avp_ind->set_manual_anchor($idx);
+    $btn_avp_manual->configure(-foreground => '#1a1f29');
+    $engine->request_render;
+});
 
 # =============================================================================
 # Columna ZIGZAG MTF (direccion INTERNA) — remuestreo OHLC + zigzag por periodo
