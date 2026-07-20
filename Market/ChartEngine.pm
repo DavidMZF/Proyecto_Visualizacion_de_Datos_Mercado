@@ -71,6 +71,8 @@ sub new {
 
         _avp_select_mode => 0,
         _cb_avp_click    => undef,
+        _avwap_select_mode => 0,
+        _cb_avwap_click    => undef,
 
         # Drag en regleta Y
         _scale_drag_panel   => undef,
@@ -123,6 +125,18 @@ sub set_avp_select_mode {
 sub set_avp_click_cb {
     my ( $self, $cb ) = @_;
     $self->{_cb_avp_click} = $cb;
+}
+
+sub set_avwap_select_mode {
+    my ( $self, $active ) = @_;
+    $self->{_avwap_select_mode} = $active ? 1 : 0;
+    my $cursor = $active ? 'crosshair' : '';
+    $self->{canvas_price}->configure(-cursor => $cursor);
+}
+
+sub set_avwap_click_cb {
+    my ( $self, $cb ) = @_;
+    $self->{_cb_avwap_click} = $cb;
 }
 
 sub set_replay_click_cb {
@@ -820,6 +834,18 @@ sub bind_events {
             return;
         }
 
+        if ( $self->{_avwap_select_mode} && $panel eq 'price'
+             && $self->{_scale_price} && $self->{_cb_avwap_click} )
+        {
+            my $idx = $self->{_scale_price}->x_to_index($lx);
+            my $candle = $self->{market}->get_candle($idx);
+            if ( $candle ) {
+                $self->{_avwap_select_mode} = 0;
+                $self->{canvas_price}->configure(-cursor => '');
+                $self->{_cb_avwap_click}->($idx);
+            }
+            return;
+        }
     });
 
     # =========================================================================
@@ -873,6 +899,10 @@ sub bind_events {
         # Cancelar modo seleccion de ancla AVP si estaba activo
         if ( $self->{_avp_select_mode} ) {
             $self->{_avp_select_mode} = 0;
+            $self->{canvas_price}->configure(-cursor => '');
+        }
+        if ( $self->{_avwap_select_mode} ) {
+            $self->{_avwap_select_mode} = 0;
             $self->{canvas_price}->configure(-cursor => '');
         }
     });

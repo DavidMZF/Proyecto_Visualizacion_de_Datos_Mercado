@@ -36,6 +36,8 @@ use Market::Overlays::ZigZagVolumeProfile;
 use Market::Overlays::ZigZagVolumeProfile2;
 use Market::Indicators::AnchoredVolumeProfile;
 use Market::Overlays::AnchoredVolumeProfile;
+use Market::Indicators::AnchoredVWAP;
+use Market::Overlays::AnchoredVWAP;
 
 # --- Ronda 2: motor SMC autonomo (sin ZigZag), leg()/trend propios ---
 use Market::Indicators::SMC_Structures2;
@@ -219,6 +221,12 @@ my $avp_ind = Market::Indicators::AnchoredVolumeProfile->new(
     bin_atr_mult => 0.5,
 );
 
+my $avwap_ind = Market::Indicators::AnchoredVWAP->new(
+    mode         => 'auto',
+    pivot_length => 50,   # mismo criterio que $avp_ind
+    band_mult    => [ 1, 2, 3 ],
+);
+
 $ind_manager->register('atr',       $atr_ind);
 $ind_manager->register('atr200',    $atr200_ind);
 $ind_manager->register('zzmtf',     $zzmtf_ind); # <-- Sube a 3er lugar
@@ -229,6 +237,7 @@ $ind_manager->register('liquidity', $liq_ind);
 $ind_manager->register('smc',       $smc_ind);   # <-- Baja a 4to lugar
 $ind_manager->register('smc2',      $smc2_ind);
 $ind_manager->register('avp',       $avp_ind);
+$ind_manager->register('avwap', $avwap_ind);
 
 print "Calculando indicadores (ATR, Liquidity, SMC, ZigZag MTF/VP)...\n";
 $ind_manager->rebuild_all($market);
@@ -281,6 +290,7 @@ my $zzvp2_overlay = Market::Overlays::ZigZagVolumeProfile2->new(
     show_poc            => 0,
 );
 my $avp_overlay = Market::Overlays::AnchoredVolumeProfile->new( source => $avp_ind );
+my $avwap_overlay = Market::Overlays::AnchoredVWAP->new( source => $avwap_ind );
 
 $overlay_mgr->register('smc',       $smc_overlay, visible => 0);
 $overlay_mgr->register('smc2',      $smc2_overlay, visible => 0);
@@ -290,6 +300,7 @@ $overlay_mgr->register('zzmtf2',    $zzmtf2_overlay, visible => 0);
 $overlay_mgr->register('zzvp',      $zzvp_overlay, visible => 0);
 $overlay_mgr->register('zzvp2',     $zzvp2_overlay, visible => 0);
 $overlay_mgr->register('avp',       $avp_overlay, visible => 0);
+$overlay_mgr->register('avwap', $avwap_overlay, visible => 0);
 
 # =============================================================================
 # PANELES Y MOTOR
@@ -923,6 +934,69 @@ $engine->set_avp_click_cb(sub {
     my ($idx) = @_;
     $avp_ind->set_manual_anchor($idx);
     $btn_avp_manual->configure(-foreground => '#1a1f29');
+    $engine->request_render;
+});
+
+# =============================================================================
+# Columna ANCHORED VWAP (auto/manual)
+# =============================================================================
+my $avwap_master = 0;
+my $refresh_avwap = sub {
+    $avwap_overlay->set_flag('show', $avwap_master);
+    $overlay_mgr->set_visible('avwap', $avwap_master);
+    $engine->request_render;
+};
+
+my $col_avwap = $make_col->('Anchored VWAP', '#2962ff');
+$make_chk->($col_avwap, 'Activar AVWAP', \$avwap_master, $refresh_avwap);
+
+my $btn_avwap_auto;
+my $btn_avwap_manual;
+$btn_avwap_auto = $col_avwap->Button(%bs,
+    -text    => 'Auto',
+    -font    => 'TkDefaultFont 8 bold',
+    -foreground => '#26a69a',
+    -command => sub {
+        $avwap_ind->set_mode('auto');
+        $btn_avwap_auto->configure(-foreground => '#26a69a');
+        $btn_avwap_manual->configure(-foreground => '#1a1f29');
+        $engine->set_avwap_select_mode(0);
+        $engine->request_render;
+    },
+)->pack(-side => 'left', -padx => 2);
+
+$btn_avwap_manual = $col_avwap->Button(%bs,
+    -text    => 'Manual: clic vela',
+    -font    => 'TkDefaultFont 8 bold',
+    -foreground => '#1a1f29',
+    -command => sub {
+        $avwap_ind->set_mode('manual');
+        $btn_avwap_auto->configure(-foreground => '#1a1f29');
+        $btn_avwap_manual->configure(-foreground => '#ef5350');
+        $engine->set_avwap_select_mode(1);
+    },
+)->pack(-side => 'left', -padx => 2);
+
+$engine->set_avwap_click_cb(sub {
+    my ($idx) = @_;
+    $avwap_ind->set_manual_anchor($idx);
+    $btn_avwap_manual->configure(-foreground => '#1a1f29');
+    $engine->request_render;
+});
+
+my $chk_band1 = 1;
+my $chk_band2 = 1;
+my $chk_band3 = 0;
+$make_chk->($col_avwap, 'Desvio 1', \$chk_band1, sub {
+    $avwap_overlay->set_flag('show_band1', $chk_band1);
+    $engine->request_render;
+});
+$make_chk->($col_avwap, 'Desvio 2', \$chk_band2, sub {
+    $avwap_overlay->set_flag('show_band2', $chk_band2);
+    $engine->request_render;
+});
+$make_chk->($col_avwap, 'Desvio 3', \$chk_band3, sub {
+    $avwap_overlay->set_flag('show_band3', $chk_band3);
     $engine->request_render;
 });
 
