@@ -926,7 +926,8 @@ my %SMC2 = (
     show_choch_swing => 0, show_choch_internal => 0,
     show_fvg => 0, show_hhll => 0,
     show_eq => 0, show_ob_swing => 0, show_ob_internal => 0,
-    show_trend_bars => 0, show_hl => 0, show_pd_zones => 0, show_mtf => 0,
+    show_trend_bars => 0, show_hl => 0, show_pd_zones => 0,
+    show_mtf_daily => 0, show_mtf_weekly => 0, show_mtf_monthly => 0,
 );
 my $smc2_master = 0;
 my $refresh_smc2 = sub {
@@ -958,7 +959,9 @@ $make_chk->($col_smc2, 'OB Internal',    \$SMC2{show_ob_internal}, $leaf_smc2);
 $make_chk->($col_smc2, 'Trend Bars',     \$SMC2{show_trend_bars},  $leaf_smc2);
 $make_chk->($col_smc2, 'Strong/Weak H-L',\$SMC2{show_hl},          $leaf_smc2);
 $make_chk->($col_smc2, 'Premium/Discount',\$SMC2{show_pd_zones},   $leaf_smc2);
-$make_chk->($col_smc2, 'MTF Levels',     \$SMC2{show_mtf},         $leaf_smc2);
+$make_chk->($col_smc2, 'MTF Daily',      \$SMC2{show_mtf_daily},   $leaf_smc2);
+$make_chk->($col_smc2, 'MTF Weekly',     \$SMC2{show_mtf_weekly},  $leaf_smc2);
+$make_chk->($col_smc2, 'MTF Monthly',    \$SMC2{show_mtf_monthly}, $leaf_smc2);
 
 # =============================================================================
 # Columna unificada: PIVOT ANCHORS + ANCHORED VOLUME PROFILE + ANCHORED VWAP
