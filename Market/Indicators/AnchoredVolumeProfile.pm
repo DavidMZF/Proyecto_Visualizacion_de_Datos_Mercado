@@ -50,6 +50,9 @@ sub new {
         _anchor_price => undef,
         _bin_height   => undef,
 
+        row_mode  => $args{row_mode}  // 'atr',   
+        row_count => $args{row_count} // 24,  
+
         _bins         => {},        # bin_idx => { buy, sell, total }
         _poc_bin      => undef,
         _total_volume => 0,
@@ -133,7 +136,8 @@ sub get_pivots       { return $_[0]->{_pivots}; }
 # get_profile: snapshot para el overlay. undef si aun no hay ancla.
 # -----------------------------------------------------------------------------
 sub get_profile {
-    my ($self) = @_;
+    my ($self, $va_pct) = @_;
+    $va_pct //= 0.70;
     return undef unless defined $self->{_anchor_index};
     return undef unless $self->{_bin_height} && $self->{_bin_height} > 0;
 
@@ -155,6 +159,8 @@ sub get_profile {
     $max_total = $self->{_bins}{ $self->{_poc_bin} }{total}
         if defined $self->{_poc_bin} && $self->{_bins}{ $self->{_poc_bin} };
 
+    my ( $val_price, $vah_price ) = $self->_compute_value_area($va_pct);
+
     return {
         anchor_index => $self->{_anchor_index},
         anchor_price => $self->{_anchor_price},
@@ -162,7 +168,53 @@ sub get_profile {
         bins         => \@bins,
         max_total    => $max_total,
         total_volume => $self->{_total_volume},
+        val_price    => $val_price,
+        vah_price    => $vah_price,
     };
+}
+sub _compute_value_area {
+    my ( $self, $va_pct ) = @_;
+    return ( undef, undef ) unless defined $self->{_poc_bin};
+
+    my @all_bins = sort { $a <=> $b } keys %{ $self->{_bins} };
+    return ( undef, undef ) unless @all_bins;
+
+    my $total = 0;
+    $total += $self->{_bins}{$_}{total} for @all_bins;
+    return ( undef, undef ) if $total <= 0;
+
+    my $target = $total * $va_pct;
+
+    my $lo = $self->{_poc_bin};
+    my $hi = $self->{_poc_bin};
+    my $acc = $self->{_bins}{$self->{_poc_bin}}{total} // 0;
+
+    my %exists = map { $_ => 1 } @all_bins;
+
+    while ( $acc < $target ) {
+        my $next_hi = $hi + 1;
+        my $next_lo = $lo - 1;
+        my $vol_hi  = $exists{$next_hi} ? $self->{_bins}{$next_hi}{total} : undef;
+        my $vol_lo  = $exists{$next_lo} ? $self->{_bins}{$next_lo}{total} : undef;
+
+        last unless defined $vol_hi || defined $vol_lo;
+
+        # Tomar DOS bins a la vez (uno de cada lado) como hace TradingView
+        # cuando ambos existen; si solo hay un lado disponible, tomar ese.
+        if ( defined $vol_hi && defined $vol_lo ) {
+            if ( $vol_hi >= $vol_lo ) { $hi = $next_hi; $acc += $vol_hi; }
+            else                      { $lo = $next_lo; $acc += $vol_lo; }
+        } elsif ( defined $vol_hi ) {
+            $hi = $next_hi; $acc += $vol_hi;
+        } else {
+            $lo = $next_lo; $acc += $vol_lo;
+        }
+    }
+
+    my $val_price = $self->{_anchor_price} + $lo * $self->{_bin_height};
+    my $vah_price = $self->{_anchor_price} + ( $hi + 1 ) * $self->{_bin_height};
+
+    return ( $val_price, $vah_price );
 }
 
 # -----------------------------------------------------------------------------
@@ -225,20 +277,37 @@ sub _set_anchor {
     my $c = $self->{_c}[$idx];
     return unless defined $c;
 
-    my $atr_vals = $self->{_atr}{values};
-    my $atr = $atr_vals->[$idx];
-    # Si el ATR aun no tiene semilla en $idx, usar el ultimo disponible.
-    if ( !defined $atr ) {
-        for ( my $i = $idx; $i >= 0; $i-- ) {
-            if ( defined $atr_vals->[$i] ) { $atr = $atr_vals->[$i]; last; }
-        }
-    }
-    $atr //= 0;
-
     $self->{_anchor_index} = $idx;
     $self->{_anchor_price} = $c->{close};
-    $self->{_bin_height}   = $atr * $self->{bin_atr_mult};
-    $self->{_bin_height}   = 0.01 if !$self->{_bin_height} || $self->{_bin_height} <= 0;
+
+    if ( $self->{row_mode} eq 'fixed_count' ) {
+        my $last = $#{ $self->{_c} };
+        my ( $range_max, $range_min );
+        for my $i ( $idx .. $last ) {
+            my $cc = $self->{_c}[$i];
+            next unless defined $cc;
+            $range_max = $cc->{high} if !defined($range_max) || $cc->{high} > $range_max;
+            $range_min = $cc->{low}  if !defined($range_min) || $cc->{low}  < $range_min;
+        }
+        $range_max //= $c->{high};
+        $range_min //= $c->{low};
+        my $range = $range_max - $range_min;
+        $range = 0.01 if $range <= 0;
+
+        $self->{_bin_height} = $range / $self->{row_count};
+    } else {
+        my $atr_vals = $self->{_atr}{values};
+        my $atr = $atr_vals->[$idx];
+        if ( !defined $atr ) {
+            for ( my $i = $idx; $i >= 0; $i-- ) {
+                if ( defined $atr_vals->[$i] ) { $atr = $atr_vals->[$i]; last; }
+            }
+        }
+        $atr //= 0;
+        $self->{_bin_height} = $atr * $self->{bin_atr_mult};
+    }
+
+    $self->{_bin_height} = 0.01 if !$self->{_bin_height} || $self->{_bin_height} <= 0;
 
     $self->{_bins}         = {};
     $self->{_poc_bin}      = undef;
@@ -302,3 +371,22 @@ sub _accumulate_candle {
     $self->{_poc_bin} = $poc_bin;
 }
 1;
+
+# -----------------------------------------------------------------------------
+# Métodos para soportar numero de filas 
+# -----------------------------------------------------------------------------
+
+sub set_row_count {
+    my ( $self, $n ) = @_;
+    return unless $n && $n > 0;
+    $self->{row_mode}  = 'fixed_count';
+    $self->{row_count} = int($n);
+    $self->_set_anchor( $self->{_anchor_index} ) if defined $self->{_anchor_index};
+}
+
+sub set_row_mode_atr {
+    my ( $self, $mult ) = @_;
+    $self->{row_mode} = 'atr';
+    $self->{bin_atr_mult} = $mult if $mult && $mult > 0;
+    $self->_set_anchor( $self->{_anchor_index} ) if defined $self->{_anchor_index};
+}

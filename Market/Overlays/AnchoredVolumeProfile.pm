@@ -11,6 +11,7 @@ use constant {
     C_SELL      => '#ef5350',
     C_POC       => '#000000',
     C_ANCHOR    => '#4f8cff',
+    C_VA        => '#787b86',   
     MAX_WIDTH_FRACTION => 0.22,
     MIN_BAR_H          => 2,
 };
@@ -142,6 +143,37 @@ sub render {
         $canvas->createLine(
             0, $py, $plot_w, $py,
             -fill => C_POC, -width => 2, -dash => [ 6, 3 ], -tags => [TAG],
+        );
+    }
+if ( defined $poc_price_mid && $scale->value_in_range($poc_price_mid) ) {
+        my $py = $scale->value_to_y($poc_price_mid);
+        $canvas->createLine(
+            0, $py, $plot_w, $py,
+            -fill => C_POC, -width => 2, -dash => [ 6, 3 ], -tags => [TAG],
+        );
+    }
+
+    # --- VAH / VAL (Value Area High / Low), estilo TradingView ---
+    if ( defined $profile->{vah_price} && $scale->value_in_range( $profile->{vah_price} ) ) {
+        my $y = $scale->value_to_y( $profile->{vah_price} );
+        $canvas->createLine(
+            0, $y, $plot_w, $y,
+            -fill => C_VA, -width => 1, -dash => [ 4, 3 ], -tags => [TAG],
+        );
+        $canvas->createText(
+            4, $y - 8, -text => 'VAH', -anchor => 'w', -fill => C_VA,
+            -font => 'TkDefaultFont 7 bold', -tags => [ TAG, TAG_LABELS ],
+        );
+    }
+    if ( defined $profile->{val_price} && $scale->value_in_range( $profile->{val_price} ) ) {
+        my $y = $scale->value_to_y( $profile->{val_price} );
+        $canvas->createLine(
+            0, $y, $plot_w, $y,
+            -fill => C_VA, -width => 1, -dash => [ 4, 3 ], -tags => [TAG],
+        );
+        $canvas->createText(
+            4, $y + 10, -text => 'VAL', -anchor => 'w', -fill => C_VA,
+            -font => 'TkDefaultFont 7 bold', -tags => [ TAG, TAG_LABELS ],
         );
     }
 

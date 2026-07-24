@@ -144,6 +144,11 @@ sub set_replay_click_cb {
     $self->{_cb_replay_click} = $cb;
 }
 
+sub set_outside_click_cb {
+    my ( $self, $cb ) = @_;
+    $self->{_cb_outside_click} = $cb;
+}
+
 sub _notify_mode_price {
     my ( $self, $is_free ) = @_;
     $self->{_cb_mode_price}->($is_free) if $self->{_cb_mode_price};
@@ -571,6 +576,7 @@ sub bind_events {
     # BUTTONPRESS-1
     # =========================================================================
     $toplevel->bind( '<ButtonPress-1>', sub {
+        $self->{_cb_outside_click}->() if $self->{_cb_outside_click};  
         my $ev = $_[0]->XEvent;
         my ( $panel, $lx, $ly ) = $hit_test->( $ev->X, $ev->Y );
         return unless defined $panel;
@@ -790,26 +796,19 @@ sub bind_events {
         my $dx = $lx - ( $self->{_drag_start_x} // $lx );
         my $dy = $ly - ( $self->{_drag_start_y} // $ly );
 
-        return if $self->{_free_mode_price} && $panel eq 'price';
-        return if $self->{_free_mode_atr}   && $panel eq 'atr';
-        return if abs($dx) > DRAG_THRESHOLD || abs($dy) > DRAG_THRESHOLD;
+        my $in_selection_mode = $self->{_replay_select_mode}
+                            || $self->{_avp_select_mode}
+                            || $self->{_avwap_select_mode};
+
+        unless ($in_selection_mode) {
+            return if $self->{_free_mode_price} && $panel eq 'price';
+            return if $self->{_free_mode_atr}   && $panel eq 'atr';
+            return if abs($dx) > DRAG_THRESHOLD || abs($dy) > DRAG_THRESHOLD;
+        }
 
         # Modo seleccion de replay: clic simple en el plot -> notificar ts de la vela
         if ( $self->{_replay_select_mode} && $panel eq 'price'
-             && $self->{_scale_price} && $self->{_cb_replay_click} )
-        {
-            my $idx = $self->{_scale_price}->x_to_index($lx);
-            my $candle = $self->{market}->get_candle($idx);
-            if ( $candle ) {
-                $self->{_replay_select_mode} = 0;
-                $self->{canvas_price}->configure(-cursor => '');
-                $self->{_cb_replay_click}->( $candle->{ts} );
-            }
-            return;
-        }
-
-        if ( $self->{_replay_select_mode} && $panel eq 'price'
-             && $self->{_scale_price} && $self->{_cb_replay_click} )
+            && $self->{_scale_price} && $self->{_cb_replay_click} )
         {
             my $idx = $self->{_scale_price}->x_to_index($lx);
             my $candle = $self->{market}->get_candle($idx);
@@ -822,7 +821,7 @@ sub bind_events {
         }
 
         if ( $self->{_avp_select_mode} && $panel eq 'price'
-             && $self->{_scale_price} && $self->{_cb_avp_click} )
+            && $self->{_scale_price} && $self->{_cb_avp_click} )
         {
             my $idx = $self->{_scale_price}->x_to_index($lx);
             my $candle = $self->{market}->get_candle($idx);
@@ -835,7 +834,7 @@ sub bind_events {
         }
 
         if ( $self->{_avwap_select_mode} && $panel eq 'price'
-             && $self->{_scale_price} && $self->{_cb_avwap_click} )
+            && $self->{_scale_price} && $self->{_cb_avwap_click} )
         {
             my $idx = $self->{_scale_price}->x_to_index($lx);
             my $candle = $self->{market}->get_candle($idx);

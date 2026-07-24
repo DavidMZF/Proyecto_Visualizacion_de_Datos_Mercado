@@ -8,6 +8,7 @@ use FindBin qw($Bin);
 use lib $Bin;
 
 use Tk;
+use Tk qw(Ev);
 use Time::Moment;
 
 use Market::MarketData;
@@ -807,53 +808,102 @@ my %BBS = (
 );
 
 # --- Fila "Herramientas:" con el toggle del panel ---
+# --- Fila "Indicadores:" con botones que abren popup por categoria ---
 my $tools_outer = $mw->Frame(-background => $BAR_BG);
 $tools_outer->pack(-side => 'top', -fill => 'x', -before => $canvas_price);
 
-my $tools_canvas = $tools_outer->Canvas(
-    -background => $BAR_BG, -highlightthickness => 0,
-)->pack(-side => 'top', -fill => 'x', -expand => 1);
-
-my $tools_hscroll = $tools_outer->Scrollbar(
-    -orient => 'horizontal', -command => ['xview', $tools_canvas],
-)->pack(-side => 'top', -fill => 'x');
-$tools_canvas->configure(-xscrollcommand => ['set', $tools_hscroll]);
-
-my $tools_bar = $tools_canvas->Frame(-background => $BAR_BG);
-$tools_canvas->createWindow(0, 0, -anchor => 'nw', -window => $tools_bar);
-
-$tools_bar->bind('<Configure>', sub {
-    $tools_canvas->configure(
-        -scrollregion => [ $tools_canvas->bbox('all') ],
-        -height       => $tools_bar->reqheight,
-    );
-});
-
+my $tools_bar = $tools_outer->Frame(-background => $BAR_BG);
+$tools_bar->pack(-side => 'left', -fill => 'x', -expand => 1);
 
 # --- Helpers de construccion del menu ---
-my $make_col = sub {
-    my ($title, $color) = @_;
-    my $col = $tools_bar->Frame(-background => $BAR_BG);
-    $col->pack(-side => 'left', -anchor => 'w', -padx => 6, -pady => 2);
-    $col->Label(-text => $title, -background => $BAR_BG, -foreground => $color,
-        -font => 'TkDefaultFont 9 bold')->pack(-side => 'left', -padx => 4);
-    return $col;
-};
-my $make_chk = sub {
-    my ($parent, $text, $varref, $cmd, $disabled) = @_;
-    my $cb = $parent->Checkbutton(
-        -text => $text, -variable => $varref, -onvalue => 1, -offvalue => 0,
-        -background => $BAR_BG, -activebackground => $BAR_BG,
-        -foreground => '#1a1f29', -activeforeground => '#000000',
-        -selectcolor => '#4f8cff',
-        -font => 'TkDefaultFont 8', -anchor => 'w',
-        ( $cmd ? ( -command => $cmd ) : () ),
-    );
-    $cb->configure(-state => 'disabled') if $disabled;
-    $cb->pack(-side => 'left', -anchor => 'w', -padx => 2);
-    return $cb;
+my $active_tools_popup;   # solo un popup abierto a la vez
+
+my $close_tools_popup = sub {
+    if ($active_tools_popup) {
+        $active_tools_popup->destroy if Tk::Exists($active_tools_popup);
+        $active_tools_popup = undef;
+    }
 };
 
+$engine->set_outside_click_cb(sub {
+    $close_tools_popup->();
+});
+
+my $make_col = sub {
+    my ($title, $color) = @_;
+
+    my $proxy = { _checks => [] };
+
+    my $btn;
+    $btn = $tools_bar->Button(
+        -text             => $title,
+        -background       => $BAR_BG,
+        -foreground       => $color,
+        -activebackground => '#e0e4ea',
+        -relief           => 'flat',
+        -bd               => 0,
+        -font             => 'TkDefaultFont 9 bold',
+        -padx             => 6, -pady => 3,
+        -command          => sub {
+            my $was_open = defined $active_tools_popup;
+            my $was_mine = $was_open
+                && ($active_tools_popup->{_owner} // '') eq $title;
+
+            $close_tools_popup->();
+            return if $was_mine;   # toggle: si ya estaba abierto el mismo, solo cerrar
+
+            my $x = $btn->rootx;
+            my $y = $btn->rooty + $btn->height;
+
+            $active_tools_popup = $btn->Toplevel(-background => '#ffffff');
+            $active_tools_popup->{_owner} = $title;
+            $active_tools_popup->overrideredirect(1);
+            $active_tools_popup->geometry("+${x}+${y}");
+            $active_tools_popup->transient($mw);
+
+            $active_tools_popup->Label(
+                -text => $title, -background => '#ffffff', -foreground => $color,
+                -font => 'TkDefaultFont 9 bold', -anchor => 'w',
+            )->pack(-fill => 'x', -padx => 8, -pady => 4);
+
+            my $body = $active_tools_popup->Frame(-background => '#ffffff');
+            $body->pack(-fill => 'both', -expand => 1, -padx => 4, -pady => 4);
+
+            for my $builder ( @{ $proxy->{_checks} } ) {
+                eval { $builder->($body); };
+                warn "Error construyendo widget en popup '$title': $@" if $@;
+            }
+        },
+    );
+    $btn->pack(-side => 'left', -padx => 2, -pady => 2);
+
+    return $proxy;
+};
+
+my $make_chk = sub {
+    my ($parent, $text, $varref, $cmd, $disabled) = @_;
+    push @{ $parent->{_checks} }, sub {
+        my ($frame) = @_;
+        my $cb = $frame->Checkbutton(
+            -text => $text, -variable => $varref, -onvalue => 1, -offvalue => 0,
+            -background => '#ffffff', -activebackground => '#ffffff',
+            -foreground => '#1a1f29', -activeforeground => '#000000',
+            -selectcolor => '#4f8cff',
+            -font => 'TkDefaultFont 9', -anchor => 'w',
+            ( $cmd ? ( -command => $cmd ) : () ),
+        );
+        $cb->configure(-state => 'disabled') if $disabled;
+        $cb->pack(-side => 'top', -anchor => 'w', -fill => 'x', -padx => 4, -pady => 1);
+    };
+};
+
+my $make_extra = sub {
+    my ($parent, $builder_sub) = @_;
+    push @{ $parent->{_checks} }, sub {
+        my ($frame) = @_;
+        $builder_sub->($frame);
+    };
+};
 # =============================================================================
 # Columna SMC STRUCTURES 2 (motor autonomo, replica fiel del Pine, sin ZigZag)
 # =============================================================================
@@ -896,126 +946,178 @@ $make_chk->($col_smc2, 'Strong/Weak H-L',\$SMC2{show_hl},          $leaf_smc2);
 $make_chk->($col_smc2, 'Premium/Discount',\$SMC2{show_pd_zones},   $leaf_smc2);
 $make_chk->($col_smc2, 'MTF Levels',     \$SMC2{show_mtf},         $leaf_smc2);
 
-$tools_bar->Frame(-background => '#2a3445', -width => 1, -height => 16)
-    ->pack(-side => 'left', -pady => 4, -padx => 4);
-
 # =============================================================================
-# Toggle de anclas
+# Columna unificada: PIVOT ANCHORS + ANCHORED VOLUME PROFILE + ANCHORED VWAP
 # =============================================================================
+my $col_anchors = $make_col->('Volume Profile & Anchors', '#ffd700');
 
+# --- Pivot Anchors (candidatas) ---
 my $pivot_anchors_master = 0;
-my $col_pivots = $make_col->('Pivot Anchors (candidatas)', '#8899aa');
-$make_chk->($col_pivots, 'Mostrar pivotes', \$pivot_anchors_master, sub {
+$make_chk->($col_anchors, 'Mostrar pivotes (candidatas)', \$pivot_anchors_master, sub {
     $pivot_anchors_overlay->set_flag('show', $pivot_anchors_master);
     $overlay_mgr->set_visible('pivot_anchors', $pivot_anchors_master);
     $engine->request_render;
 });
-# =============================================================================
-# Columna ANCHORED VOLUME PROFILE (auto/manual)
-# =============================================================================
+
+$make_extra->($col_anchors, sub {
+    my ($frame) = @_;
+    $frame->Frame(-background => '#2a3445', -height => 1)
+        ->pack(-fill => 'x', -pady => 4);
+});
+
+# --- Anchored Volume Profile (auto/manual) ---
 my $avp_master = 0;
 my $refresh_avp = sub {
     $avp_overlay->set_flag('show', $avp_master);
     $overlay_mgr->set_visible('avp', $avp_master);
     $engine->request_render;
 };
+$make_chk->($col_anchors, 'Activar AVP', \$avp_master, $refresh_avp);
 
-my $col_avp = $make_col->('Anchored Volume Profile', '#ffd700');
-$make_chk->($col_avp, 'Activar AVP', \$avp_master, $refresh_avp);
+$make_extra->($col_anchors, sub {
+    my ($frame) = @_;
+    my $row = $frame->Frame(-background => '#ffffff');
+    $row->pack(-fill => 'x', -padx => 4, -pady => 1);
+
+    $row->Label(
+        -text       => 'AVP tamaño fila:',
+        -background => '#ffffff',
+        -foreground => '#1a1f29',
+        -font       => 'TkDefaultFont 8',
+    )->pack(-side => 'left', -padx => 4);
+
+    my $avp_bin_scale = $row->Scale(
+        -from        => 5,
+        -to          => 100,
+        -resolution  => 1,
+        -orient      => 'horizontal',
+        -length      => 100,
+        -background  => '#ffffff',
+        -foreground  => '#1a1f29',
+        -troughcolor => '#e0e4ea',
+        -showvalue   => 1,
+        -font        => 'TkDefaultFont 7',
+        -command     => sub {
+            my ($val) = @_;
+            $avp_ind->set_row_count($val + 0);
+            $engine->request_render;
+        },
+    );
+    $avp_bin_scale->pack(-side => 'left', -padx => 2);
+    $avp_bin_scale->set( $avp_ind->{row_count} // 24 );
+});
 
 my $btn_avp_auto;
 my $btn_avp_manual;
-$btn_avp_auto = $col_avp->Button(%bs,
-    -text    => 'Auto',
-    -font    => 'TkDefaultFont 8 bold',
-    -foreground => '#26a69a',
-    -command => sub {
-        $avp_ind->set_mode('auto');
-        $btn_avp_auto->configure(-foreground => '#26a69a');
-        $btn_avp_manual->configure(-foreground => '#1a1f29');
-        $engine->set_avp_select_mode(0);
-        $engine->request_render;
-    },
-)->pack(-side => 'left', -padx => 2);
+$make_extra->($col_anchors, sub {
+    my ($frame) = @_;
+    my $row = $frame->Frame(-background => '#ffffff');
+    $row->pack(-fill => 'x', -padx => 4, -pady => 1);
 
-$btn_avp_manual = $col_avp->Button(%bs,
-    -text    => 'Manual: clic vela',
-    -font    => 'TkDefaultFont 8 bold',
+    $btn_avp_auto = $row->Button(%bs,
+        -text       => 'AVP: Auto',
+        -font       => 'TkDefaultFont 8 bold',
+        -foreground => '#26a69a',
+        -command    => sub {
+            $avp_ind->set_mode('auto');
+            $btn_avp_auto->configure(-foreground => '#26a69a');
+            $btn_avp_manual->configure(-foreground => '#1a1f29');
+            $engine->set_avp_select_mode(0);
+            $engine->request_render;
+        },
+    )->pack(-side => 'left', -padx => 2);
+
+    $btn_avp_manual = $row->Button(%bs,
+    -text       => 'AVP: Manual (clic vela)',
+    -font       => 'TkDefaultFont 8 bold',
     -foreground => '#1a1f29',
-    -command => sub {
+    -command    => sub {
         $avp_ind->set_mode('manual');
         $btn_avp_auto->configure(-foreground => '#1a1f29');
         $btn_avp_manual->configure(-foreground => '#ef5350');
         $engine->set_avp_select_mode(1);   # queda armado para el proximo clic
+        $close_tools_popup->();            # <-- AGREGAR: libera el canvas para el clic
     },
-)->pack(-side => 'left', -padx => 2);
+    )->pack(-side => 'left', -padx => 2);
+});
 
 $engine->set_avp_click_cb(sub {
     my ($idx) = @_;
     $avp_ind->set_manual_anchor($idx);
-    $btn_avp_manual->configure(-foreground => '#1a1f29');
+    $btn_avp_manual->configure(-foreground => '#1a1f29')
+        if $btn_avp_manual && Tk::Exists($btn_avp_manual);
     $engine->request_render;
 });
 
-# =============================================================================
-# Columna ANCHORED VWAP (auto/manual)
-# =============================================================================
+$make_extra->($col_anchors, sub {
+    my ($frame) = @_;
+    $frame->Frame(-background => '#2a3445', -height => 1)
+        ->pack(-fill => 'x', -pady => 4);
+});
+
+# --- Anchored VWAP (auto/manual + desviaciones) ---
 my $avwap_master = 0;
 my $refresh_avwap = sub {
     $avwap_overlay->set_flag('show', $avwap_master);
     $overlay_mgr->set_visible('avwap', $avwap_master);
     $engine->request_render;
 };
-
-my $col_avwap = $make_col->('Anchored VWAP', '#2962ff');
-$make_chk->($col_avwap, 'Activar AVWAP', \$avwap_master, $refresh_avwap);
+$make_chk->($col_anchors, 'Activar AVWAP', \$avwap_master, $refresh_avwap);
 
 my $btn_avwap_auto;
 my $btn_avwap_manual;
-$btn_avwap_auto = $col_avwap->Button(%bs,
-    -text    => 'Auto',
-    -font    => 'TkDefaultFont 8 bold',
-    -foreground => '#26a69a',
-    -command => sub {
-        $avwap_ind->set_mode('auto');
-        $btn_avwap_auto->configure(-foreground => '#26a69a');
-        $btn_avwap_manual->configure(-foreground => '#1a1f29');
-        $engine->set_avwap_select_mode(0);
-        $engine->request_render;
-    },
-)->pack(-side => 'left', -padx => 2);
+$make_extra->($col_anchors, sub {
+    my ($frame) = @_;
+    my $row = $frame->Frame(-background => '#ffffff');
+    $row->pack(-fill => 'x', -padx => 4, -pady => 1);
 
-$btn_avwap_manual = $col_avwap->Button(%bs,
-    -text    => 'Manual: clic vela',
-    -font    => 'TkDefaultFont 8 bold',
+    $btn_avwap_auto = $row->Button(%bs,
+        -text       => 'AVWAP: Auto',
+        -font       => 'TkDefaultFont 8 bold',
+        -foreground => '#26a69a',
+        -command    => sub {
+            $avwap_ind->set_mode('auto');
+            $btn_avwap_auto->configure(-foreground => '#26a69a');
+            $btn_avwap_manual->configure(-foreground => '#1a1f29');
+            $engine->set_avwap_select_mode(0);
+            $engine->request_render;
+        },
+    )->pack(-side => 'left', -padx => 2);
+
+    $btn_avwap_manual = $row->Button(%bs,
+    -text       => 'AVWAP: Manual (clic vela)',
+    -font       => 'TkDefaultFont 8 bold',
     -foreground => '#1a1f29',
-    -command => sub {
+    -command    => sub {
         $avwap_ind->set_mode('manual');
         $btn_avwap_auto->configure(-foreground => '#1a1f29');
         $btn_avwap_manual->configure(-foreground => '#ef5350');
         $engine->set_avwap_select_mode(1);
+        $close_tools_popup->();            # <-- AGREGAR
     },
-)->pack(-side => 'left', -padx => 2);
+    )->pack(-side => 'left', -padx => 2);
+});
 
 $engine->set_avwap_click_cb(sub {
     my ($idx) = @_;
     $avwap_ind->set_manual_anchor($idx);
-    $btn_avwap_manual->configure(-foreground => '#1a1f29');
+    $btn_avwap_manual->configure(-foreground => '#1a1f29')
+        if $btn_avwap_manual && Tk::Exists($btn_avwap_manual);
     $engine->request_render;
 });
 
 my $chk_band1 = 1;
 my $chk_band2 = 1;
 my $chk_band3 = 0;
-$make_chk->($col_avwap, 'Desvio 1', \$chk_band1, sub {
+$make_chk->($col_anchors, 'Desvio 1', \$chk_band1, sub {
     $avwap_overlay->set_flag('show_band1', $chk_band1);
     $engine->request_render;
 });
-$make_chk->($col_avwap, 'Desvio 2', \$chk_band2, sub {
+$make_chk->($col_anchors, 'Desvio 2', \$chk_band2, sub {
     $avwap_overlay->set_flag('show_band2', $chk_band2);
     $engine->request_render;
 });
-$make_chk->($col_avwap, 'Desvio 3', \$chk_band3, sub {
+$make_chk->($col_anchors, 'Desvio 3', \$chk_band3, sub {
     $avwap_overlay->set_flag('show_band3', $chk_band3);
     $engine->request_render;
 });
@@ -1033,9 +1135,6 @@ my $refresh_zzmtf = sub {
 my $col_zzmtf = $make_col->('ZigZag MTF (Interna)', '#26a69a');
 $make_chk->($col_zzmtf, 'Mostrar ZigZag Interno', \$ZZMTF{show}, $refresh_zzmtf);
 
-$tools_bar->Frame(-background => '#2a3445', -width => 1, -height => 16)
-    ->pack(-side => 'left', -pady => 4, -padx => 4);
-
 # =============================================================================
 # Columna ZIGZAG VOLUME PROFILE (direccion EXTERNA) — ahora usa ZZVP2
 # =============================================================================
@@ -1045,12 +1144,6 @@ $make_chk->($col_zzvp, 'Activar Zigzag Volumen', \$zzvp2_on, sub {
     $overlay_mgr->set_visible('zzvp2', $zzvp2_on);
     $engine->request_render;
 });
-
-$tools_bar->Frame(-background => '#2a3445', -width => 1, -height => 16)
-    ->pack(-side => 'left', -pady => 4, -padx => 4);
-
-$tools_bar->Frame(-background => '#2a3445', -width => 1, -height => 16)
-    ->pack(-side => 'left', -pady => 4, -padx => 4);
 
 # =============================================================================
 # Columna LIQUIDITY (Swing / BSL / SSL / EQH / EQL / Sweeps / Grabs / Runs)
