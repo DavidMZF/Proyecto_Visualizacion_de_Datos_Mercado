@@ -195,47 +195,39 @@ sub _get_fibo_levels_manual {
     my $anchor_candle = $c->[$anchor];
     return undef unless defined $anchor_candle;
 
-    # Determinar direccion provisional comparando el cierre de la ultima
-    # vela contra el ancla, luego tomar el extremo real de la ventana en
-    # esa direccion (igual criterio que el fibo interno: max/min de rango).
-    return undef unless defined $c->[$last_idx];
+    # Inicializamos los extremos incluyendo la propia vela ancla
+    my $hi = $anchor_candle->{high};
+    my $lo = $anchor_candle->{low};
 
-    my ( $hi, $lo );
+    # Buscamos los extremos reales en toda la ventana de tiempo (ancla -> actual)
     for my $i ( $anchor + 1 .. $last_idx ) {
         my $candle = $c->[$i];
         next unless defined $candle;
-        $hi = $candle->{high} if !defined($hi) || $candle->{high} > $hi;
-        $lo = $candle->{low}  if !defined($lo) || $candle->{low}  < $lo;
-    }
-    # Si el ancla es la ultima vela (no hay velas posteriores todavia),
-    # usamos la propia vela ancla como referencia minima.
-    if ( !defined($hi) || !defined($lo) ) {
-        $hi = $anchor_candle->{high};
-        $lo = $anchor_candle->{low};
+        $hi = $candle->{high} if $candle->{high} > $hi;
+        $lo = $candle->{low}  if $candle->{low}  < $lo;
     }
 
     # Direccion: se elige el lado (arriba/abajo) donde el precio se movio
-    # MAS lejos desde el ancla, comparando contra el punto medio de esa
-    # vela (mas robusto que comparar closes, que puede quedar invertido
-    # si el precio hace swing en ambas direcciones despues del ancla).
+    # MAS lejos desde el ancla, comparando contra el punto medio de esa vela.
     my $anchor_mid = ( $anchor_candle->{high} + $anchor_candle->{low} ) / 2;
     my $dist_up    = $hi - $anchor_mid;
     my $dist_down  = $anchor_mid - $lo;
     my $going_up   = ( $dist_up >= $dist_down );
 
-    # El ancla toma la mecha real segun la direccion: si el precio sube
-    # desde ahi, el ancla es el piso (low); si baja, el ancla es el techo (high).
-    my $from_price = $going_up ? $anchor_candle->{low} : $anchor_candle->{high};
-
-    my $search_from = ( $anchor + 1 <= $last_idx ) ? $anchor + 1 : $anchor;
-    my ( $to_price, $to_index );
+    my $search_from = $anchor;
+    my ( $from_price, $to_price, $to_index );
+    
     if ($going_up) {
-        $to_price = $hi;
-        $to_index = $self->_index_of_extreme( $search_from, $last_idx, 'high', $hi );
+        # Si sube, el Fibonacci abarca desde el minimo absoluto hasta el maximo absoluto
+        $from_price = $lo;
+        $to_price   = $hi;
+        $to_index   = $self->_index_of_extreme( $search_from, $last_idx, 'high', $hi );
     }
     else {
-        $to_price = $lo;
-        $to_index = $self->_index_of_extreme( $search_from, $last_idx, 'low', $lo );
+        # Si baja, abarca desde el maximo absoluto hasta el minimo absoluto
+        $from_price = $hi;
+        $to_price   = $lo;
+        $to_index   = $self->_index_of_extreme( $search_from, $last_idx, 'low', $lo );
     }
 
     return $self->_build_levels( $from_price, $anchor, $to_price, $to_index );
