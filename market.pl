@@ -31,10 +31,12 @@ use Market::Indicators::ZigZagMTF;
 use Market::Indicators::ZigZagMTF2;
 use Market::Indicators::ZigZagVolumeProfile;
 use Market::Indicators::ZigZagVolumeProfile2;
+use Market::Indicators::Fibonacci;
 use Market::Overlays::ZigZagMTF;
 use Market::Overlays::ZigZagMTF2;
 use Market::Overlays::ZigZagVolumeProfile;
 use Market::Overlays::ZigZagVolumeProfile2;
+use Market::Overlays::Fibonacci;
 use Market::Indicators::AnchoredVolumeProfile;
 use Market::Overlays::AnchoredVolumeProfile;
 use Market::Indicators::AnchoredVWAP;
@@ -193,6 +195,11 @@ my $zzvp2_ind = Market::Indicators::ZigZagVolumeProfile2->new(
     max_profiles         => 25,
 );
 
+my $fibo_ind = Market::Indicators::Fibonacci->new(
+    source_zzvp2 => $zzvp2_ind,   # zigzag EXTERNO/por volumen -> modo auto
+    mode         => 'off',        # arranca apagado, el usuario activa un boton
+);
+
 my $liq_ind = Market::Indicators::Liquidity->new(
     atr        => $atr_ind,
     zzmtf      => $zzmtf_ind,   
@@ -248,6 +255,7 @@ $ind_manager->register('smc2',      $smc2_ind);
 $ind_manager->register('avp',       $avp_ind);
 $ind_manager->register('avwap', $avwap_ind);
 $ind_manager->register('pivot_anchors', $pivot_anchors_ind);
+$ind_manager->register('fibonacci', $fibo_ind);
 
 print "Calculando indicadores (ATR, Liquidity, SMC, ZigZag MTF/VP)...\n";
 $ind_manager->rebuild_all($market);
@@ -299,6 +307,7 @@ my $zzvp2_overlay = Market::Overlays::ZigZagVolumeProfile2->new(
     show_volume_profile => 0,   # barras de volumen por nivel + etiquetas %
     show_poc            => 0,
 );
+my $fibo_overlay = Market::Overlays::Fibonacci->new( source => $fibo_ind );
 my $avp_overlay = Market::Overlays::AnchoredVolumeProfile->new( source => $avp_ind );
 my $avwap_overlay = Market::Overlays::AnchoredVWAP->new( source => $avwap_ind );
 my $pivot_anchors_overlay = Market::Overlays::PivotAnchors->new( source => $pivot_anchors_ind );
@@ -313,6 +322,9 @@ $overlay_mgr->register('zzvp2',     $zzvp2_overlay, visible => 0);
 $overlay_mgr->register('avp',       $avp_overlay, visible => 0);
 $overlay_mgr->register('avwap', $avwap_overlay, visible => 0);
 $overlay_mgr->register('pivot_anchors', $pivot_anchors_overlay, visible => 0);
+$overlay_mgr->register('fibonacci', $fibo_overlay, visible => 1);
+# visible => 1: el propio indicador nace en mode => 'off' (no dibuja nada
+# hasta que el usuario active auto o manual con los botones de abajo).
 
 # =============================================================================
 # PANELES Y MOTOR
@@ -1144,6 +1156,70 @@ my $col_zzvp = $make_col->('ZigZag Volume Profile (Externa)', '#7e57c2');
 my $zzvp2_on = 0;
 $make_chk->($col_zzvp, 'Activar Zigzag Volumen', \$zzvp2_on, sub {
     $overlay_mgr->set_visible('zzvp2', $zzvp2_on);
+    $engine->request_render;
+});
+
+# =============================================================================
+# Columna FIBONACCI — auto (zigzag externo/volumen) o manual (clic vela)
+# =============================================================================
+my $col_fibo = $make_col->('Fibonacci', '#ffb300');
+
+my $btn_fibo_off;
+my $btn_fibo_auto;
+my $btn_fibo_manual;
+$make_extra->($col_fibo, sub {
+    my ($frame) = @_;
+    my $row = $frame->Frame(-background => '#ffffff');
+    $row->pack(-fill => 'x', -padx => 4, -pady => 1);
+
+    $btn_fibo_off = $row->Button(%bs,
+        -text       => 'Fibo: Off',
+        -font       => 'TkDefaultFont 8 bold',
+        -foreground => '#ef5350',
+        -command    => sub {
+            $fibo_ind->set_mode('off');
+            $btn_fibo_off->configure(-foreground => '#ef5350');
+            $btn_fibo_auto->configure(-foreground => '#1a1f29');
+            $btn_fibo_manual->configure(-foreground => '#1a1f29');
+            $engine->set_fibo_select_mode(0);
+            $engine->request_render;
+        },
+    )->pack(-side => 'left', -padx => 2);
+
+    $btn_fibo_auto = $row->Button(%bs,
+        -text       => 'Fibo: Auto',
+        -font       => 'TkDefaultFont 8 bold',
+        -foreground => '#1a1f29',
+        -command    => sub {
+            $fibo_ind->set_mode('auto');
+            $btn_fibo_off->configure(-foreground => '#1a1f29');
+            $btn_fibo_auto->configure(-foreground => '#26a69a');
+            $btn_fibo_manual->configure(-foreground => '#1a1f29');
+            $engine->set_fibo_select_mode(0);
+            $engine->request_render;
+        },
+    )->pack(-side => 'left', -padx => 2);
+
+    $btn_fibo_manual = $row->Button(%bs,
+        -text       => 'Fibo: Manual (clic vela)',
+        -font       => 'TkDefaultFont 8 bold',
+        -foreground => '#1a1f29',
+        -command    => sub {
+            $fibo_ind->set_mode('manual');
+            $btn_fibo_off->configure(-foreground => '#1a1f29');
+            $btn_fibo_auto->configure(-foreground => '#1a1f29');
+            $btn_fibo_manual->configure(-foreground => '#ef5350');
+            $engine->set_fibo_select_mode(1);   # queda armado para el proximo clic
+            $close_tools_popup->();             # libera el canvas para el clic
+        },
+    )->pack(-side => 'left', -padx => 2);
+});
+
+$engine->set_fibo_click_cb(sub {
+    my ($idx) = @_;
+    $fibo_ind->set_manual_anchor($idx);
+    $btn_fibo_manual->configure(-foreground => '#ef5350')
+        if $btn_fibo_manual && Tk::Exists($btn_fibo_manual);
     $engine->request_render;
 });
 

@@ -92,8 +92,13 @@ sub new {
         # --- RONDA 2 / PARTE 6: Premium/Discount/Equilibrium zones ---
         show_pd_zones => $args{show_pd_zones} // 0,   # showPDInp (false por defecto en el Pine)
 
-        # --- RONDA 2 / PARTE 8: MTF Levels (Previous D/W/M High-Low) ---
-        show_mtf => $args{show_mtf} // 0,
+        # --- RONDA 3 / PARTE 8: MTF Levels (Previous D/W/M High-Low) ---
+        # Ahora 3 flags independientes (Daily/Weekly/Monthly), igual que
+        # showDInp/showWInp/showMInp en el Pine. show_mtf se mantiene como
+        # alias legado: si viene definido, inicializa los 3 (compatibilidad).
+        show_mtf_daily   => $args{show_mtf_daily}   // $args{show_mtf} // 0,
+        show_mtf_weekly  => $args{show_mtf_weekly}  // $args{show_mtf} // 0,
+        show_mtf_monthly => $args{show_mtf_monthly} // $args{show_mtf} // 0,
     };
     bless $self, $class;
     return $self;
@@ -138,8 +143,12 @@ sub render {
         if $self->{show_hl} && $src->can('get_trailing_extremes');
     $self->_render_pd_zones( $canvas, $scale, $src )
         if $self->{show_pd_zones} && $src->can('get_trailing_extremes');
-    $self->_render_mtf_levels( $canvas, $scale, $src )
-        if $self->{show_mtf} && $src->can('get_mtf_levels');
+    $self->_render_mtf_level( $canvas, $scale, $src, 'D' )
+        if $self->{show_mtf_daily} && $src->can('get_mtf_daily_level');
+    $self->_render_mtf_level( $canvas, $scale, $src, 'W' )
+        if $self->{show_mtf_weekly} && $src->can('get_mtf_weekly_level');
+    $self->_render_mtf_level( $canvas, $scale, $src, 'M' )
+        if $self->{show_mtf_monthly} && $src->can('get_mtf_monthly_level');
 }
 
 # -----------------------------------------------------------------------------
@@ -464,14 +473,23 @@ sub _mix_line {
 }
 
 # -----------------------------------------------------------------------------
-# _render_mtf_levels: RONDA 2 / PARTE 8 -- Previous D/W/M High/Low.
-# Linea horizontal desde la vela de origen (top_index/bottom_index) hasta el
-# borde derecho visible, con chip 'PDH'/'PDL', 'PWH'/'PWL', 'PMH'/'PML'.
+# _render_mtf_level: RONDA 3 / PARTE 8 -- Previous D/W/M High/Low, UNA unidad
+# por llamada (Daily, Weekly o Monthly de forma independiente, igual que
+# drawLevels('D'/'W'/'M', ...) llamado por separado en el Pine). Linea
+# horizontal desde la vela de origen (top_index/bottom_index) hasta el borde
+# derecho visible, con chip 'PDH'/'PDL', 'PWH'/'PWL', 'PMH'/'PML'.
 # -----------------------------------------------------------------------------
-sub _render_mtf_levels {
-    my ( $self, $canvas, $scale, $src ) = @_;
-    my $levels = $src->get_mtf_levels;
-    return unless $levels && %$levels;
+sub _render_mtf_level {
+    my ( $self, $canvas, $scale, $src, $unit ) = @_;
+
+    my $getter = {
+        D => 'get_mtf_daily_level',
+        W => 'get_mtf_weekly_level',
+        M => 'get_mtf_monthly_level',
+    }->{$unit} or return;
+
+    my $lv = $src->$getter;
+    return unless $lv;
 
     my $off    = $scale->{offset};
     my $vb     = $scale->{visible_bars};
@@ -481,29 +499,25 @@ sub _render_mtf_levels {
 
     my @placed;
 
-    for my $unit (qw(D W M)) {
-        my $lv = $levels->{$unit} or next;
+    for my $side (qw(top bottom)) {
+        my $price = $lv->{$side};
+        next unless defined $price && $scale->value_in_range($price);
 
-        for my $side (qw(top bottom)) {
-            my $price = $lv->{$side};
-            next unless defined $price && $scale->value_in_range($price);
+        my $origin_idx = $side eq 'top' ? $lv->{top_index} : $lv->{bottom_index};
+        my $x1 = $scale->index_to_center_x($origin_idx);
+        my $x2 = $scale->index_to_center_x($right_idx);
+        $x1 = 0       if $x1 < 0;
+        $x2 = $plot_w if $x2 > $plot_w;
+        next if $x2 <= $x1;
 
-            my $origin_idx = $side eq 'top' ? $lv->{top_index} : $lv->{bottom_index};
-            my $x1 = $scale->index_to_center_x($origin_idx);
-            my $x2 = $scale->index_to_center_x($right_idx);
-            $x1 = 0       if $x1 < 0;
-            $x2 = $plot_w if $x2 > $plot_w;
-            next if $x2 <= $x1;
+        my $y = $scale->value_to_y($price);
+        $canvas->createLine( $x1, $y, $x2, $y,
+            -fill => $col, -width => 1, -dash => [3,2], -tags => [TAG] );
 
-            my $y = $scale->value_to_y($price);
-            $canvas->createLine( $x1, $y, $x2, $y,
-                -fill => $col, -width => 1, -dash => [3,2], -tags => [TAG] );
-
-            my $label = 'P' . $unit . ( $side eq 'top' ? 'H' : 'L' );
-            $self->_chip( $canvas, $x2 - 22, $y, $label,
-                -color => $col, -place => ( $side eq 'top' ? 'above' : 'below' ),
-                -placed => \@placed, -font => 'TkDefaultFont 7 bold' );
-        }
+        my $label = 'P' . $unit . ( $side eq 'top' ? 'H' : 'L' );
+        $self->_chip( $canvas, $x2 - 22, $y, $label,
+            -color => $col, -place => ( $side eq 'top' ? 'above' : 'below' ),
+            -placed => \@placed, -font => 'TkDefaultFont 7 bold' );
     }
 }
 

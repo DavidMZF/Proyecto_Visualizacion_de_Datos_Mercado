@@ -939,7 +939,12 @@ sub _period_key {
     my ( $self, $ts, $unit ) = @_;
     my $tm = Time::Moment->from_epoch($ts)->with_offset_same_instant(GMT_OFFSET_MIN);
     if ( $unit eq 'D' ) {
-        return sprintf( '%04d-%02d-%02d', $tm->year, $tm->month, $tm->day_of_month );
+        # Sesion CME Globex: el dia de trading empieza a las 17:00 (break de
+        # mantenimiento diario), no a medianoche. Restamos 17h antes de leer
+        # la fecha para que todo lo >= 17:00 caiga ya en el "dia" siguiente,
+        # igual que la vela D nativa de TradingView para NQ1!.
+        my $shifted = $tm->minus_hours(17);
+        return sprintf( '%04d-%02d-%02d', $shifted->year, $shifted->month, $shifted->day_of_month );
     }
     elsif ( $unit eq 'W' ) {
         my $dow = $tm->day_of_week;   # 1=Mon..7=Sun
@@ -1000,12 +1005,29 @@ sub get_mtf_levels {
     for my $unit ( sort keys %want ) {
         my ( $enabled, $period_sec, $u ) = @{ $want{$unit} };
         next unless $enabled;
-        next if defined $tf_sec && $tf_sec > $period_sec;   # higherTimeframe('D'/'W'/'M') -> se omite
+
+        my $same_tf = defined $tf_sec && $tf_sec == $period_sec;   # timeframe.isdaily/isweekly/ismonthly
+        next if !$same_tf && defined $tf_sec && $tf_sec > $period_sec;   # higherTimeframe(unit) -> se omite
+
+        if ($same_tf) {
+            # sameTF: Pine usa high/low de la vela ACTUAL, no la anterior.
+            my $last = $c->[ $n - 1 ];
+            $out{$unit} = {
+                top                 => $last->{high},
+                bottom              => $last->{low},
+                top_index           => $n - 1,
+                bottom_index        => $n - 1,
+                period_start_index  => $n - 1,
+                period_end_index    => $n - 1,
+            };
+            next;
+        }
 
         my $last_key = $self->_period_key( $c->[ $n - 1 ]{ts}, $u );
         next unless defined $last_key;
 
         # ultima vela DEL PERIODO ANTERIOR (primer key distinto yendo hacia atras)
+        # == high[1]/low[1] del TF pedido en el Pine.
         my $prev_key;
         my $end_idx;
         for ( my $k = $n - 1 ; $k >= 0 ; $k-- ) {
@@ -1019,8 +1041,13 @@ sub get_mtf_levels {
             my $key = $self->_period_key( $c->[$k]{ts}, $u );
             last if $key ne $prev_key;
             $start_idx = $k;
-            if ( !defined $hi || $c->[$k]{high} > $hi ) { $hi = $c->[$k]{high}; $hi_idx = $k; }
-            if ( !defined $lo || $c->[$k]{low}  < $lo ) { $lo = $c->[$k]{low};  $lo_idx = $k; }
+            # >= / <= (no estricto): iterando hacia atras en el tiempo, en caso
+            # de empate se queda con la ocurrencia MAS ANTIGUA (la ultima que
+            # sobreescribe yendo hacia $start_idx), igual que Pine
+            # topA.indexof(topA.max()) / botA.indexof(botA.min()), que toman
+            # la PRIMERA ocurrencia en orden cronologico ascendente.
+            if ( !defined $hi || $c->[$k]{high} >= $hi ) { $hi = $c->[$k]{high}; $hi_idx = $k; }
+            if ( !defined $lo || $c->[$k]{low}  <= $lo ) { $lo = $c->[$k]{low};  $lo_idx = $k; }
         }
         next unless defined $hi;
 
@@ -1035,6 +1062,29 @@ sub get_mtf_levels {
     }
 
     return \%out;
+}
+
+# get_mtf_daily_level() / get_mtf_weekly_level() / get_mtf_monthly_level():
+# equivalentes a get_mtf_levels() pero para UNA sola unidad, para que
+# market.pl/overlay puedan tratar Daily, Weekly y Monthly como 3 indicadores
+# independientes (cada uno con su propio on/off), igual que showDInp/showWInp/
+# showMInp en el Pine.
+sub get_mtf_daily_level {
+    my ($self) = @_;
+    my $all = $self->get_mtf_levels;
+    return $all->{D};
+}
+
+sub get_mtf_weekly_level {
+    my ($self) = @_;
+    my $all = $self->get_mtf_levels;
+    return $all->{W};
+}
+
+sub get_mtf_monthly_level {
+    my ($self) = @_;
+    my $all = $self->get_mtf_levels;
+    return $all->{M};
 }
 
 1;
