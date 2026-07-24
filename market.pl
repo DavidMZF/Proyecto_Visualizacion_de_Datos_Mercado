@@ -111,10 +111,10 @@ print "Cargando datos...\n";
 my $market = Market::MarketData->new;
 
 my $csv_path;
-for my $cand ("$Bin/data/2026_07_13.csv", "$Bin/2026_07_13.csv", "$Bin/../data/2026_07_13.csv") {
+for my $cand ("$Bin/data/2026_07_20.csv", "$Bin/2026_07_20.csv", "$Bin/../data/2026_07_20.csv") {
     if (-f $cand) { $csv_path = $cand; last; }
 }
-die "No se encuentra 2026_07_13.csv\n" unless $csv_path;
+die "No se encuentra 2026_07_20.csv\n" unless $csv_path;
 
 open my $fh, '<', $csv_path or die "Error abriendo CSV '$csv_path': $!\n";
 <$fh>;
@@ -186,11 +186,11 @@ my $zzvp_ind = Market::Indicators::ZigZagVolumeProfile->new(
 );
 
 my $zzvp2_ind = Market::Indicators::ZigZagVolumeProfile2->new(
-    swing_length         => 600,   # sobre velas 1m: ~10h por ventana, zigzag macro
+    swing_length         => 150,   # sobre velas 1m: ~10h por ventana, zigzag macro
     channel_width_factor => 1,
     atr_period           => 200,
     volume_bin_count     => 5,
-    max_profiles         => 15,
+    max_profiles         => 25,
 );
 
 my $liq_ind = Market::Indicators::Liquidity->new(
@@ -215,6 +215,8 @@ my $smc_ind = Market::Indicators::SMC_Structures->new(
 # --- Ronda 2: motor SMC autonomo, replica fiel del Pine, sin ZigZag ---
 my $smc2_ind = Market::Indicators::SMC_Structures2->new(
     atr => $atr200_ind,   # ATR(200), igual que atrLenInp del Pine (Equal H/L, Order Blocks)
+    fvg_reduce => 1,
+    fvg_history_max => 20,
 );
 
 my $avp_ind = Market::Indicators::AnchoredVolumeProfile->new(

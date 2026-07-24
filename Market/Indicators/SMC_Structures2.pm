@@ -17,7 +17,11 @@ package Market::Indicators::SMC_Structures2;
 # Cada una tiene su propio pivot swingHigh/swingLow, internalHigh/internalLow
 # y su propio trend.bias (BULLISH/BEARISH), tal como en el Pine original.
 #
-# FVG, Equal H/L y Order Blocks se agregan en partes posteriores.
+# FVG (PARTE 2, corregido para replicar fielmente "SMC Structures and FVG"
+# de LudoGH68): limite de historial (fvgHistoryNbr), mitigacion PARCIAL que
+# deja el FVG vivo (pintado gris) y solo se borra con mitigacion TOTAL,
+# reduccion opcional de la caja, y alerta de mitigacion una sola vez por FVG.
+# Equal H/L y Order Blocks tambien incluidos.
 # =============================================================================
 
 use strict;
@@ -80,12 +84,17 @@ sub new {
         _equal_low  => { currentLevel => undef, lastLevel => undef, crossed => 0, barIndex => undef },
         _eq_events  => [],   # { kind=>'EQH'|'EQL', idx_from, idx_to, price, ts }
 
-        # --- PARTE 2: Fair Value Gaps ---
-        fvg_auto_thresh => $args{fvg_auto_thresh} // 1,   # fvgAutoTInp
-        fvg_extend      => $args{fvg_extend}      // 1,   # fvgExtInp (en barras)
-        _fvgs        => [],   # historial completo (para overlay / stats)
-        _active_fvgs => [],   # aun no mitigados/borrados
+        # --- PARTE 2: Fair Value Gaps (replica fiel de "SMC Structures and
+        # FVG" de LudoGH68: isBullishFVG/isBearishFVG + FVGDraw + limite de
+        # historial fvgHistoryNbr) ---
+        fvg_auto_thresh => $args{fvg_auto_thresh} // 1,   # fvgAutoTInp (sin uso directo aqui, se conserva por compat.)
+        fvg_extend      => $args{fvg_extend}      // 1,   # fvgExtInp (en barras; no aplica limite, el FVG se extiende siempre)
+        fvg_history_max => $args{fvg_history_max} // 5,   # fvgHistoryNbr (Pine): maximo de FVG activos simultaneos
+        fvg_reduce      => $args{fvg_reduce}      // 0,   # isMitigatedFvgToReduce (Pine)
+        _fvgs        => [],   # historial completo (para overlay / stats) -- incluye deleted/mitigated
+        _active_fvgs => [],   # aun no borrados definitivamente (incluye estado 'mitigated', que sigue vivo)
         _fvg_delta_cum => 0,  # ta.cum(abs(deltaPct)) acumulado
+        _fvg_alerts    => [], # eventos de mitigacion parcial (una vez por FVG), analogo a alert("FVG has been mitigated")
 
         # --- PARTE 3: Order Blocks (storeOrderBlock / deleteOrderBlocks) ---
         ob_filter    => $args{ob_filter}    // 'atr',    # 'atr' | 'range' (obFilterInp)
@@ -160,6 +169,7 @@ sub reset {
     $self->{_fvgs}         = [];
     $self->{_active_fvgs}  = [];
     $self->{_fvg_delta_cum} = 0;
+    $self->{_fvg_alerts}    = [];
 
     $self->{_swing_obs}    = [];
     $self->{_internal_obs} = [];
@@ -243,8 +253,9 @@ sub _process {
     $self->_display_structure( $i, 1 );  # internal
     $self->_display_structure( $i, 0 );  # swing
 
-    $self->_update_fvgs($i);   # deleteFairValueGaps() -- mitigar/expirar antes de detectar
-    $self->_detect_fvg($i);    # drawFairValueGaps()   -- Parte 2
+    $self->_detect_fvg($i);    # isBullishFVG/isBearishFVG + push -- se agrega el box de ESTA barra primero
+    $self->_update_fvgs($i);   # FVGDraw() -- recorre TODOS los FVG activos, incluido el recien creado,
+                                # evaluando mitigacion contra el low/high de esta misma barra -- igual orden que el Pine
 
     push @{ $self->{_internal_bias_hist} }, $self->{_internal_bias};  # Parte 3
 }
@@ -538,57 +549,95 @@ sub _max2 { return $_[0] > $_[1] ? $_[0] : $_[1]; }
 sub _min2 { return $_[0] < $_[1] ? $_[0] : $_[1]; }
 
 # -----------------------------------------------------------------------------
-# FAIR VALUE GAPS -- replica de deleteFairValueGaps() / drawFairValueGaps()
-# para fvgTFInp = '' (timeframe del chart, caso por defecto: sin MTF/repaint).
+# FAIR VALUE GAPS -- replica fiel de "SMC Structures and FVG" (LudoGH68):
+#
+#   isBullishFVG = high[3] < low[1]
+#   isBearishFVG = low[3]  > high[1]
+#
+# Al detectarse, se agrega el FVG al array de activos y se aplica el limite
+# fvgHistoryNbr: "if array.size(fvgBoxes) > fvgHistoryNbr + 1 -> remove(0)"
+# (se descarta el FVG activo MAS ANTIGUO, sin importar si esta mitigado).
 # -----------------------------------------------------------------------------
 sub _detect_fvg {
     my ( $self, $i ) = @_;
-    return if $i < 2;
+    return if $i < 3;
     my $c = $self->{_c};
 
-    my $last_close = $c->[$i-1]{close};
-    my $last_open  = $c->[$i-1]{open};
-    my $cur_high   = $c->[$i]{high};
-    my $cur_low    = $c->[$i]{low};
-    my $last2_high = $c->[$i-2]{high};
-    my $last2_low  = $c->[$i-2]{low};
+    # Pine: isBullishFVG = high[3] < low[1]  (en indices absolutos, vela actual = i)
+    #       isBearishFVG = low[3]  > high[1]
+    my $high3 = $c->[$i-3]{high};
+    my $low3  = $c->[$i-3]{low};
+    my $high1 = $c->[$i-1]{high};
+    my $low1  = $c->[$i-1]{low};
 
-    return unless $last_open;
-    my $delta_pct = ( $last_close - $last_open ) / ( $last_open * 100 );
-
-    $self->{_fvg_delta_cum} += abs($delta_pct);
-    my $thresh = $self->{fvg_auto_thresh}
-        ? ( $self->{_fvg_delta_cum} / ( $i > 0 ? $i : 1 ) * 2 )
-        : 0;
-
-    my $bull_fvg = ( $cur_low > $last2_high ) && ( $last_close > $last2_high ) && ( $delta_pct > $thresh );
-    my $bear_fvg = ( $cur_high < $last2_low ) && ( $last_close < $last2_low ) && ( -$delta_pct > $thresh );
+    my $bull_fvg = $high3 < $low1;
+    my $bear_fvg = $low3  > $high1;
 
     if ($bull_fvg) {
-        my $mid = ( $cur_low + $last2_high ) / 2;
+        # Pine box: left=bar_index-2, top=low[1], right=bar_index[1], bottom=high[3]
         my $fvg = {
             dir => 'bull', idx_start => $i - 2, created => $i,
-            top => $cur_low, bottom => $last2_high, mid => $mid,
-            state => 'active', mitig_at => undef,
+            top => $low1, bottom => $high3, mid => ( $low1 + $high3 ) / 2,
+            state => 'active', mitig_at => undef, alerted => 0,
         };
         push @{ $self->{_fvgs} },        $fvg;
         push @{ $self->{_active_fvgs} }, $fvg;
+        $self->_trim_fvg_history;
     }
     if ($bear_fvg) {
-        my $mid = ( $cur_high + $last2_low ) / 2;
+        # Pine box: left=bar_index-2, top=low[3], right=bar_index[1], bottom=high[1]
         my $fvg = {
             dir => 'bear', idx_start => $i - 2, created => $i,
-            top => $last2_low, bottom => $cur_high, mid => $mid,
-            state => 'active', mitig_at => undef,
+            top => $low3, bottom => $high1, mid => ( $low3 + $high1 ) / 2,
+            state => 'active', mitig_at => undef, alerted => 0,
         };
         push @{ $self->{_fvgs} },        $fvg;
         push @{ $self->{_active_fvgs} }, $fvg;
+        $self->_trim_fvg_history;
     }
 }
 
 # -----------------------------------------------------------------------------
-# _update_fvgs: replica deleteFairValueGaps().
-#   bull mitigado si low < fvg.bottom ; bear mitigado si high > fvg.top.
+# _trim_fvg_history: replica el limite fvgHistoryNbr del Pine.
+#   if array.size(fvgBoxes) > fvgHistoryNbr + 1 -> se borra el MAS ANTIGUO
+#   (indice 0 del array de activos), sin importar si esta mitigado o no.
+#   Esto corre justo despues de agregar un FVG nuevo (tanto en la rama bull
+#   como en la bear), igual que en el Pine.
+# -----------------------------------------------------------------------------
+sub _trim_fvg_history {
+    my ($self) = @_;
+    my $active = $self->{_active_fvgs};
+    while ( scalar(@$active) > $self->{fvg_history_max} + 1 ) {
+        my $oldest = shift @$active;
+        $oldest->{state} = 'deleted';
+    }
+}
+
+# -----------------------------------------------------------------------------
+# _update_fvgs: replica FVGDraw() del Pine EXACTAMENTE, incluido el orden de
+# ejecucion dentro de la barra:
+#
+#   Pine (misma barra i):
+#     1. isBullishFVG/isBearishFVG -> se crea el box y se hace array.push()
+#        (esto ocurre en _detect_fvg, que ahora corre ANTES que este metodo)
+#     2. FVGDraw(fvgBoxes, ...) recorre TODO el array, incluido el box recien
+#        agregado en el paso 1, y evalua mitigacion contra low/high de la
+#        barra actual (i).
+#
+#   Por eso aqui _update_fvgs ya NO salta los FVG con created == i: un FVG
+#   creado en la barra i se evalua contra el low/high de esa misma barra i,
+#   igual que en el Pine. Esto es lo que hace que "algunas mitigaciones no
+#   se detectaran": antes se perdia la primera oportunidad de mitigacion
+#   (la de la propia barra de creacion) porque se saltaba explicitamente.
+#
+#   bull: mitigacion TOTAL (se borra, box.delete) si low <= bottom.
+#         mitigacion PARCIAL (box.set_bgcolor gris, SIGUE VIVO) si low < top.
+#         Con fvg_reduce activo, ademas se contrae: top := low.
+#   bear: mitigacion TOTAL si high >= top.
+#         mitigacion PARCIAL (gris, sigue vivo) si high > bottom.
+#         Con fvg_reduce activo: bottom := high.
+#   La alerta de mitigacion ("FVG has been mitigated") se dispara una unica
+#   vez por FVG, la primera vez que pasa a estado 'mitigated'.
 # -----------------------------------------------------------------------------
 sub _update_fvgs {
     my ( $self, $i ) = @_;
@@ -596,12 +645,44 @@ sub _update_fvgs {
     my $cur = $self->{_c}[$i];
     my @keep;
     for my $f ( @{ $self->{_active_fvgs} } ) {
-        if ( $i <= $f->{created} ) { push @keep, $f; next; }
-        if ( $f->{dir} eq 'bull' && $cur->{low} < $f->{bottom} ) {
-            $f->{state} = 'mitigated'; $f->{mitig_at} = $i; next;
+        if ( $f->{dir} eq 'bull' ) {
+            if ( $cur->{low} <= $f->{bottom} ) {
+                # Mitigacion TOTAL -- equivalente a box.delete(): desaparece
+                # por completo (se saca de _active_fvgs, ya no se dibuja).
+                $f->{state} = 'deleted'; $f->{mitig_at} = $i;
+                next;
+            }
+            if ( $cur->{low} < $f->{top} ) {
+                # Mitigacion PARCIAL -- box.set_bgcolor(mitigatedFvgColor),
+                # sigue vivo y se sigue extendiendo (box.set_right) hasta
+                # que eventualmente se cumpla la condicion de borrado total.
+                $f->{state} = 'mitigated';
+                $f->{mitig_at} //= $i;
+                unless ( $f->{alerted} ) {
+                    push @{ $self->{_fvg_alerts} }, {
+                        kind => 'FVGMit', dir => $f->{dir}, index => $i, ts => $cur->{ts}, fvg => $f,
+                    };
+                    $f->{alerted} = 1;
+                }
+                $f->{top} = $cur->{low} if $self->{fvg_reduce};   # box.set_top(value, low)
+            }
         }
-        if ( $f->{dir} eq 'bear' && $cur->{high} > $f->{top} ) {
-            $f->{state} = 'mitigated'; $f->{mitig_at} = $i; next;
+        else {
+            if ( $cur->{high} >= $f->{top} ) {
+                $f->{state} = 'deleted'; $f->{mitig_at} = $i;
+                next;
+            }
+            if ( $cur->{high} > $f->{bottom} ) {
+                $f->{state} = 'mitigated';
+                $f->{mitig_at} //= $i;
+                unless ( $f->{alerted} ) {
+                    push @{ $self->{_fvg_alerts} }, {
+                        kind => 'FVGMit', dir => $f->{dir}, index => $i, ts => $cur->{ts}, fvg => $f,
+                    };
+                    $f->{alerted} = 1;
+                }
+                $f->{bottom} = $cur->{high} if $self->{fvg_reduce};   # box.set_bottom(value, high)
+            }
         }
         push @keep, $f;
     }
@@ -609,8 +690,11 @@ sub _update_fvgs {
 }
 
 # Accesores Parte 2.
-sub get_fvgs      { return $_[0]->{_fvgs}; }
-sub get_eq_events { return $_[0]->{_eq_events}; }
+# get_fvgs(): historial COMPLETO (activos, mitigados vivos y borrados). El
+# overlay decide que dibujar segun 'state' (ver Overlays::SMC_Structures2).
+sub get_fvgs       { return $_[0]->{_fvgs}; }
+sub get_fvg_alerts { return $_[0]->{_fvg_alerts}; }   # eventos de mitigacion parcial (una vez por FVG)
+sub get_eq_events  { return $_[0]->{_eq_events}; }
 
 # -----------------------------------------------------------------------------
 # PARTE 3: ORDER BLOCKS -- replica de storeOrderBlock() / deleteOrderBlocks().
@@ -781,18 +865,18 @@ sub get_trailing_extremes {
 }
 
 # -----------------------------------------------------------------------------
-# RONDA 2 / PARTE 7: Alertas -- replica las 14 alertcondition() del Pine.
+# RONDA 2 / PARTE 7: Alertas -- replica las alertcondition() del Pine.
 # get_ob_mit_events(): historial crudo de mitigaciones de OB (analogo a
-# get_events/get_eq_events/get_fvgs para las demas categorias).
+# get_events/get_eq_events/get_fvgs/get_fvg_alerts para las demas categorias).
 #
-# get_alerts_at($i): consolida, para la vela $i, cuales de las 14
-# condiciones del Pine se cumplieron EN ESA VELA (equivalente a leer
-# currentAlerts.* en esa barra). Devuelve un hashref con claves identicas
-# a los nombres usados en alertcondition() del Pine, valor 1/0:
+# get_alerts_at($i): consolida, para la vela $i, cuales de las condiciones
+# del Pine se cumplieron EN ESA VELA (equivalente a leer currentAlerts.* en
+# esa barra). Devuelve un hashref con claves identicas a los nombres usados
+# en alertcondition() del Pine, valor 1/0:
 #   intBullBOS, intBearBOS, intBullCHoCH, intBearCHoCH,
 #   swBullBOS,  swBearBOS,  swBullCHoCH,  swBearCHoCH,
 #   intBullOBMit, intBearOBMit, swBullOBMit, swBearOBMit,
-#   eqHighs, eqLows, bullFVG, bearFVG
+#   eqHighs, eqLows, bullFVG, bearFVG, fvgMitigated
 # Uso tipico (market.pl): recorrer $i desde la ultima vela notificada hasta
 # processed_last() y consultar get_alerts_at($i) para disparar avisos.
 # -----------------------------------------------------------------------------
@@ -804,7 +888,7 @@ sub get_alerts_at {
         intBullBOS intBearBOS intBullCHoCH intBearCHoCH
         swBullBOS  swBearBOS  swBullCHoCH  swBearCHoCH
         intBullOBMit intBearOBMit swBullOBMit swBearOBMit
-        eqHighs eqLows bullFVG bearFVG
+        eqHighs eqLows bullFVG bearFVG fvgMitigated
     );
 
     for my $e ( @{ $self->{_events} } ) {
@@ -830,6 +914,11 @@ sub get_alerts_at {
     for my $f ( @{ $self->{_fvgs} } ) {
         next unless $f->{created} == $i;
         $a{ $f->{dir} eq 'bull' ? 'bullFVG' : 'bearFVG' } = 1;
+    }
+
+    for my $e ( @{ $self->{_fvg_alerts} } ) {
+        next unless $e->{index} == $i;
+        $a{fvgMitigated} = 1;
     }
 
     return \%a;

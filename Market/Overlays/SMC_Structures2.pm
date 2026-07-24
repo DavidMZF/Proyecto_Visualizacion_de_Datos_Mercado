@@ -15,6 +15,10 @@ package Market::Overlays::SMC_Structures2;
 #   - Se agregan: EQH/EQL (linea punteada horizontal entre los dos pivotes
 #     iguales + chip centrado) y Order Blocks (rectangulo desde la vela de
 #     origen hasta el borde derecho visible, un color por bias).
+#   - FVG (corregido para replicar "SMC Structures and FVG" de LudoGH68):
+#     un FVG mitigado PARCIALMENTE ya no desaparece del overlay -- se sigue
+#     dibujando en gris (igual que mitigatedFvgColor en el Pine) y solo deja
+#     de dibujarse cuando alcanza mitigacion TOTAL (state == 'deleted').
 #
 # Sub-toggles independientes: show_bos_swing, show_bos_internal,
 # show_choch_swing, show_choch_internal, show_fvg, show_hhll,
@@ -36,6 +40,7 @@ use constant {
     C_PREM => '#ef5350',   # Premium  - mismo tono que bajista (premCol en el Pine)
     C_DISC => '#26a69a',   # Discount - mismo tono que alcista (discCol en el Pine)
     C_EQUI => '#787b86',   # Equilibrium - gris neutro (eqCol en el Pine)
+    C_FVG_MIT => '#787b86',# FVG mitigado (mitigatedFvgColor en el Pine) - gris
 };
 
 sub new {
@@ -252,28 +257,34 @@ sub _render_eq {
 }
 
 # -----------------------------------------------------------------------------
-# _render_fvgs: identico criterio visual al overlay viejo (rectangulo con
-# opacidad decreciente por antiguedad, chip 'FVG' si hay espacio).
+# _render_fvgs: replica fiel de FVGDraw() (LudoGH68) en cuanto a estados:
+#   - 'active'    -> color normal (bullishFvgColor / bearishFvgColor)
+#   - 'mitigated' -> box.set_bgcolor(mitigatedFvgColor): sigue vivo, se
+#                    pinta GRIS, y se sigue extendiendo hasta la ultima vela
+#                    procesada (box.set_right en cada vela).
+#   - 'deleted'   -> box.delete(): ya no se dibuja (mitigacion TOTAL).
+# El chip 'FVG' se sigue mostrando mientras el FVG este vivo (activo o
+# mitigado parcial), igual que el label del Pine (solo se borra junto con
+# el box al eliminarse).
 # -----------------------------------------------------------------------------
 sub _render_fvgs {
     my ( $self, $canvas, $scale, $src, $placed ) = @_;
     my $fvgs = $src->get_fvgs or return;
     my $last_known = $src->processed_last;
-    my $max_age    = 50;
     my $off    = $scale->{offset};
     my $vb     = $scale->{visible_bars};
     my $plot_w = $scale->_plot_w;
 
     for my $f (@$fvgs) {
-        # FVG mitigado: desaparece de inmediato (igual que TradingView por
-        # defecto), en vez de seguir dibujandose atenuado.
-        next if $f->{state} eq 'mitigated';
+        # Solo se deja de dibujar cuando hubo mitigacion TOTAL (box.delete
+        # en el Pine). La mitigacion PARCIAL ('mitigated') sigue viva y se
+        # dibuja en gris, igual que mitigatedFvgColor en el script original.
+        next if $f->{state} eq 'deleted';
 
-        my $age = $last_known - $f->{created};
-        next if $age > $max_age;
-
-        my $right_idx = $f->{created} + $max_age;
-        $right_idx = $last_known if $right_idx > $last_known;
+        # Pine: box.set_right(value, bar_index) en cada vela mientras el
+        # FVG sigue activo -> se extiende hasta la ultima vela procesada,
+        # sin limite de antiguedad.
+        my $right_idx = $last_known;
 
         next if $right_idx      < $off;
         next if $f->{idx_start} > $off + $vb;
@@ -282,11 +293,9 @@ sub _render_fvgs {
                  || ( $f->{bottom} < $scale->{min_val}
                    && $f->{top}    > $scale->{max_val} );
 
-        my $fresh   = 1 - ( $age / $max_age );
-        $fresh      = 0 if $fresh < 0;
-        my $base    = ( $f->{dir} eq 'bull' ) ? C_UP : C_DOWN;
-        my $fill_op = 0.18 + 0.17 * $fresh;
-        my $fill    = _mix( $base, $fill_op );
+        my $is_mitigated = ( $f->{state} eq 'mitigated' );
+        my $base = $is_mitigated ? C_FVG_MIT : ( $f->{dir} eq 'bull' ? C_UP : C_DOWN );
+        my $fill = _mix( $base, $is_mitigated ? 0.20 : 0.30 );
 
         my $x1 = $scale->index_to_center_x( $f->{idx_start} );
         my $x2 = $scale->index_to_center_x($right_idx);
@@ -300,7 +309,7 @@ sub _render_fvgs {
         $canvas->createRectangle( $x1, $yt, $x2, $yb,
             -fill => $fill, -outline => $fill, -width => 0, -tags => [TAG] );
 
-        if ( ( $yb - $yt ) >= 12 && $age <= int( $max_age * 0.5 ) ) {
+        if ( ( $yb - $yt ) >= 12 ) {
             my $tx = ( $x1 + $x2 ) / 2;
             $tx = 24 if $tx < 24;
             $self->_chip( $canvas, $tx, ( $yt + $yb ) / 2, 'FVG',
