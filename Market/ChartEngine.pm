@@ -76,6 +76,16 @@ sub new {
         _fibo_select_mode => 0,
         _cb_fibo_click    => undef,
 
+        # Trend Line Channel manual: construccion por 3 clics + drag de handles.
+        _tlc_select_mode => 0,   # 1 mientras se arma (clics 1/2/3)
+        _tlc_source      => undef,   # Market::Indicators::TrendLineChannel
+        _tlc_overlay     => undef,   # Market::Overlays::TrendLineChannel (para hit-test de handles)
+        _tlc_cb_change   => undef,   # se llama tras cada clic/drag para refrescar UI
+        _tlc_drag        => undef,   # 'a' | 'b' | 'center' | undef mientras se arrastra un handle
+        _tlc_drag_last_idx   => undef,
+        _tlc_drag_last_price => undef,
+        _tlc_handle_hit_r    => 9,   # radio de deteccion en pixeles para agarrar un handle
+
         # Drag en regleta Y
         _scale_drag_panel   => undef,
         _scale_drag_start_y => undef,
@@ -151,6 +161,35 @@ sub set_fibo_click_cb {
 sub set_avwap_click_cb {
     my ( $self, $cb ) = @_;
     $self->{_cb_avwap_click} = $cb;
+}
+
+# -----------------------------------------------------------------------------
+# Trend Line Channel manual
+# -----------------------------------------------------------------------------
+sub set_tlc_source {
+    my ( $self, $source, $overlay ) = @_;
+    $self->{_tlc_source}  = $source;
+    $self->{_tlc_overlay} = $overlay;
+}
+
+sub set_tlc_select_mode {
+    my ( $self, $active ) = @_;
+    $self->{_tlc_select_mode} = $active ? 1 : 0;
+    my $cursor = $active ? 'crosshair' : '';
+    $self->{canvas_price}->configure(-cursor => $cursor);
+    if ( !$active && $self->{_tlc_source} && $self->{_tlc_source}->can('cancel_pending') ) {
+        $self->{_tlc_source}->cancel_pending;
+    }
+}
+
+sub set_tlc_change_cb {
+    my ( $self, $cb ) = @_;
+    $self->{_tlc_cb_change} = $cb;
+}
+
+sub _notify_tlc_change {
+    my ($self) = @_;
+    $self->{_tlc_cb_change}->() if $self->{_tlc_cb_change};
 }
 
 sub set_replay_click_cb {
@@ -577,6 +616,16 @@ sub bind_events {
             $self->{_mouse_in_atr}   = 0;
             $self->{_mouse_x}        = $lx;
             $self->{_mouse_y}        = $ly;
+
+            # Preview del Trend Line Channel mientras se construye (stage 1/2).
+            if ( $self->{_tlc_select_mode} && $self->{_tlc_source} && $self->{_tlc_overlay}
+                && $self->{_scale_price} && $self->{_tlc_source}->is_building )
+            {
+                my $cidx   = $self->{_scale_price}->x_to_index_float($lx);
+                my $cprice = $self->{_scale_price}->y_to_value($ly);
+                $self->{_tlc_overlay}->set_cursor( $cidx, $cprice );
+                $self->request_render;
+            }
         } elsif ( $panel eq 'atr' || $panel eq 'atr_scale' ) {
             $self->{_mouse_in_atr}   = 1;
             $self->{_mouse_in_price} = 0;
@@ -637,6 +686,28 @@ sub bind_events {
             return;
         }
 
+        # --- Trend Line Channel: hit-test de handles (A/B/centro) para
+        #     iniciar un drag, SOLO si no estamos en modo de construccion
+        #     (3 clics) y ya existe un canal confirmado. ---
+        if ( $panel eq 'price' && !$self->{_tlc_select_mode}
+            && $self->{_tlc_overlay} && $self->{_scale_price} )
+        {
+            my $hp = $self->{_tlc_overlay}->get_handle_positions( $self->{_scale_price} );
+            if ($hp) {
+                my $r = $self->{_tlc_handle_hit_r};
+                for my $key (qw(a b center)) {
+                    my ( $hx, $hy ) = @{ $hp->{$key} };
+                    if ( abs( $lx - $hx ) <= $r && abs( $ly - $hy ) <= $r ) {
+                        $self->{_tlc_drag} = $key;
+                        $self->{_tlc_drag_last_idx}   = $self->{_scale_price}->x_to_index_float($lx);
+                        $self->{_tlc_drag_last_price} = $self->{_scale_price}->y_to_value($ly);
+                        $self->{canvas_price}->configure(-cursor => 'fleur');
+                        return;
+                    }
+                }
+            }
+        }
+
         # --- Drag normal en el plot ---
         $self->{_mouse_in_price} = ( $panel eq 'price' ) ? 1 : 0;
         $self->{_mouse_in_atr}   = ( $panel eq 'atr'   ) ? 1 : 0;
@@ -672,6 +743,29 @@ sub bind_events {
     # =========================================================================
     $toplevel->bind( '<B1-Motion>', sub {
         my $ev = $_[0]->XEvent;
+
+        # --- Drag activo de un handle del Trend Line Channel ---
+        if ( defined $self->{_tlc_drag} && $self->{_tlc_source} && $self->{_scale_price} ) {
+            my ( $panel, $lx, $ly ) = $hit_test->( $ev->X, $ev->Y );
+            if ( defined $panel && $panel eq 'price' ) {
+                my $idx   = $self->{_scale_price}->x_to_index_float($lx);
+                my $price = $self->{_scale_price}->y_to_value($ly);
+
+                if ( $self->{_tlc_drag} eq 'a' ) {
+                    $self->{_tlc_source}->move_point_a( $idx, $price );
+                } elsif ( $self->{_tlc_drag} eq 'b' ) {
+                    $self->{_tlc_source}->move_point_b( $idx, $price );
+                } elsif ( $self->{_tlc_drag} eq 'center' ) {
+                    my $d_idx   = $idx   - ( $self->{_tlc_drag_last_idx}   // $idx );
+                    my $d_price = $price - ( $self->{_tlc_drag_last_price} // $price );
+                    $self->{_tlc_source}->translate( $d_idx, $d_price );
+                    $self->{_tlc_drag_last_idx}   = $idx;
+                    $self->{_tlc_drag_last_price} = $price;
+                }
+                $self->request_render;
+            }
+            return;
+        }
 
         # --- Drag activo en regleta Y ---
         if ( defined $self->{_scale_drag_panel} ) {
@@ -794,6 +888,16 @@ sub bind_events {
     # BUTTONRELEASE-1
     # =========================================================================
     $toplevel->bind( '<ButtonRelease-1>', sub {
+        if ( defined $self->{_tlc_drag} ) {
+            $self->{_tlc_drag} = undef;
+            $self->{_tlc_drag_last_idx}   = undef;
+            $self->{_tlc_drag_last_price} = undef;
+            $self->{canvas_price}->configure(-cursor => $self->{_tlc_select_mode} ? 'crosshair' : '');
+            $self->_notify_tlc_change;
+            $self->request_render;
+            return;
+        }
+
         if ( defined $self->{_scale_drag_panel} ) {
             $self->{_scale_drag_panel}    = undef;
             $self->{_scale_drag_start_y}  = undef;
@@ -813,7 +917,8 @@ sub bind_events {
         my $in_selection_mode = $self->{_replay_select_mode}
                             || $self->{_avp_select_mode}
                             || $self->{_avwap_select_mode}
-                            || $self->{_fibo_select_mode};
+                            || $self->{_fibo_select_mode}
+                            || $self->{_tlc_select_mode};
 
         unless ($in_selection_mode) {
             return if $self->{_free_mode_price} && $panel eq 'price';
@@ -871,6 +976,30 @@ sub bind_events {
                 $self->{canvas_price}->configure(-cursor => '');
                 $self->{_cb_fibo_click}->($idx);
             }
+            return;
+        }
+
+        # Trend Line Channel manual: clic 1 (origen) -> clic 2 (pendiente)
+        # -> clic 3 (ancho). El modo de seleccion queda armado hasta que se
+        # complete el clic 3 (o se cancele con ESC / boton Off).
+        if ( $self->{_tlc_select_mode} && $panel eq 'price'
+            && $self->{_scale_price} && $self->{_tlc_source} )
+        {
+            my $idx   = $self->{_scale_price}->x_to_index_float($lx);
+            my $price = $self->{_scale_price}->y_to_value($ly);
+            my $src   = $self->{_tlc_source};
+
+            if ( !$src->is_building ) {
+                $src->start_at( $idx, $price );
+            } elsif ( $src->building_stage == 1 ) {
+                $src->set_point_b( $idx, $price );
+            } elsif ( $src->building_stage == 2 ) {
+                $src->set_deviation( $idx, $price );
+                $self->{_tlc_select_mode} = 0;
+                $self->{canvas_price}->configure(-cursor => '');
+            }
+            $self->_notify_tlc_change;
+            $self->request_render;
             return;
         }
     });
@@ -931,6 +1060,13 @@ sub bind_events {
         if ( $self->{_avwap_select_mode} ) {
             $self->{_avwap_select_mode} = 0;
             $self->{canvas_price}->configure(-cursor => '');
+        }
+        if ( $self->{_tlc_select_mode} ) {
+            $self->{_tlc_select_mode} = 0;
+            $self->{canvas_price}->configure(-cursor => '');
+            $self->{_tlc_source}->cancel_pending if $self->{_tlc_source};
+            $self->_notify_tlc_change;
+            $self->request_render;
         }
     });
     # =========================================================================

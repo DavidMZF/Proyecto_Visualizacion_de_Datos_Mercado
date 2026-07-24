@@ -43,6 +43,8 @@ use Market::Indicators::AnchoredVWAP;
 use Market::Overlays::AnchoredVWAP;
 use Market::Indicators::PivotAnchors;
 use Market::Overlays::PivotAnchors;
+use Market::Indicators::TrendLineChannel;
+use Market::Overlays::TrendLineChannel;
 
 # --- Ronda 2: motor SMC autonomo (sin ZigZag), leg()/trend propios ---
 use Market::Indicators::SMC_Structures2;
@@ -200,6 +202,8 @@ my $fibo_ind = Market::Indicators::Fibonacci->new(
     mode         => 'off',        # arranca apagado, el usuario activa un boton
 );
 
+my $tlc_ind = Market::Indicators::TrendLineChannel->new;
+
 my $liq_ind = Market::Indicators::Liquidity->new(
     atr        => $atr_ind,
     zzmtf      => $zzmtf_ind,   
@@ -308,6 +312,7 @@ my $zzvp2_overlay = Market::Overlays::ZigZagVolumeProfile2->new(
     show_poc            => 0,
 );
 my $fibo_overlay = Market::Overlays::Fibonacci->new( source => $fibo_ind );
+my $tlc_overlay = Market::Overlays::TrendLineChannel->new( source => $tlc_ind );
 my $avp_overlay = Market::Overlays::AnchoredVolumeProfile->new( source => $avp_ind );
 my $avwap_overlay = Market::Overlays::AnchoredVWAP->new( source => $avwap_ind );
 my $pivot_anchors_overlay = Market::Overlays::PivotAnchors->new( source => $pivot_anchors_ind );
@@ -323,6 +328,7 @@ $overlay_mgr->register('avp',       $avp_overlay, visible => 0);
 $overlay_mgr->register('avwap', $avwap_overlay, visible => 0);
 $overlay_mgr->register('pivot_anchors', $pivot_anchors_overlay, visible => 0);
 $overlay_mgr->register('fibonacci', $fibo_overlay, visible => 1);
+$overlay_mgr->register('trendlinechannel', $tlc_overlay, visible => 1);
 # visible => 1: el propio indicador nace en mode => 'off' (no dibuja nada
 # hasta que el usuario active auto o manual con los botones de abajo).
 
@@ -1224,6 +1230,71 @@ $engine->set_fibo_click_cb(sub {
     $btn_fibo_manual->configure(-foreground => '#ef5350')
         if $btn_fibo_manual && Tk::Exists($btn_fibo_manual);
     $engine->request_render;
+});
+
+# =============================================================================
+# Columna TREND LINE CHANNEL — manual (3 clics: origen, pendiente, ancho).
+# Fase 1: solo modo manual. El modo "Auto" se agrega en una fase posterior.
+# =============================================================================
+my $col_tlc = $make_col->('Trend Line Channel', '#ff9800');
+
+my $btn_tlc_off;
+my $btn_tlc_manual;
+$make_extra->($col_tlc, sub {
+    my ($frame) = @_;
+    my $row = $frame->Frame(-background => '#ffffff');
+    $row->pack(-fill => 'x', -padx => 4, -pady => 1);
+
+    $btn_tlc_off = $row->Button(%bs,
+        -text       => 'Canal: Off',
+        -font       => 'TkDefaultFont 8 bold',
+        -foreground => '#ef5350',
+        -command    => sub {
+            $engine->set_tlc_select_mode(0);
+            $btn_tlc_off->configure(-foreground => '#ef5350');
+            $btn_tlc_manual->configure(-foreground => '#1a1f29');
+            $engine->request_render;
+        },
+    )->pack(-side => 'left', -padx => 2);
+
+    $btn_tlc_manual = $row->Button(%bs,
+        -text       => 'Canal: Manual (3 clics)',
+        -font       => 'TkDefaultFont 8 bold',
+        -foreground => '#1a1f29',
+        -command    => sub {
+            $tlc_ind->clear_channel;   # un solo canal manual a la vez
+            $engine->set_tlc_select_mode(1);   # queda armado para el proximo clic
+            $btn_tlc_off->configure(-foreground => '#1a1f29');
+            $btn_tlc_manual->configure(-foreground => '#ef5350');
+            $close_tools_popup->();            # libera el canvas para el clic
+        },
+    )->pack(-side => 'left', -padx => 2);
+
+    my $row2 = $frame->Frame(-background => '#ffffff');
+    $row2->pack(-fill => 'x', -padx => 4, -pady => 1);
+    $row2->Button(%bs,
+        -text       => 'Borrar canal',
+        -font       => 'TkDefaultFont 8 bold',
+        -foreground => '#1a1f29',
+        -command    => sub {
+            $tlc_ind->clear_channel;
+            $tlc_ind->cancel_pending;
+            $engine->set_tlc_select_mode(0);
+            $btn_tlc_off->configure(-foreground => '#ef5350');
+            $btn_tlc_manual->configure(-foreground => '#1a1f29');
+            $engine->request_render;
+        },
+    )->pack(-side => 'left', -padx => 2);
+});
+
+$engine->set_tlc_source( $tlc_ind, $tlc_overlay );
+$engine->set_tlc_change_cb(sub {
+    # Al completar el clic 3, ChartEngine ya desactivo _tlc_select_mode
+    # internamente; sincronizamos el boton "Manual" para que refleje eso.
+    if ( $btn_tlc_manual && Tk::Exists($btn_tlc_manual) && $tlc_ind->has_channel ) {
+        $btn_tlc_off->configure(-foreground => '#ef5350');
+        $btn_tlc_manual->configure(-foreground => '#1a1f29');
+    }
 });
 
 # =============================================================================
