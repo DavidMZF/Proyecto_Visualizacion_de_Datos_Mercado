@@ -77,7 +77,13 @@ sub processed_last { return $#{ $_[0]->{_c} }; }
 sub set_mode {
     my ( $self, $mode ) = @_;
     return unless $mode eq 'auto' || $mode eq 'manual';
+    my $was_manual = ( $self->{mode} eq 'manual' );
     $self->{mode} = $mode;
+
+    if ( $mode eq 'auto' && $was_manual ) {
+        $self->reanchor_to_latest_pivot;
+    }
+
 }
 sub get_mode { return $_[0]->{mode}; }
 
@@ -254,6 +260,23 @@ sub _accumulate_candle {
     }
 
     $self->{_series}{$idx} = $point;
+}
+
+sub reanchor_to_latest_pivot {
+    my ($self) = @_;
+    return unless @{ $self->{_pivots} };
+
+    my $latest = $self->{_pivots}[-1];
+    for my $p ( reverse @{ $self->{_pivots} } ) {
+        if ( $p->{index} > ( $latest->{index} // -1 ) ) {
+            $latest = $p;
+        }
+    }
+    # _pivots ya esta en orden de deteccion (creciente por indice), asi
+    # que el ultimo elemento del array ES el pivote confirmado mas reciente.
+    $latest = $self->{_pivots}[-1];
+
+    $self->_set_anchor( $latest->{index} );
 }
 
 1;

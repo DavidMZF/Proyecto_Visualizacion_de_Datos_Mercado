@@ -55,29 +55,24 @@ sub render {
     my $baseline_x = $plot_w - $max_bar_w;
     my $max_total  = $profile->{max_total} || 1;
 
-    # --- Marca vertical del ancla + puntito en el precio de ancla ---
+    # --- Punto precio del ancla ---
     if ( defined $anchor_idx ) {
         my $ax = $scale->index_to_center_x($anchor_idx);
         if ( $ax >= 0 && $ax <= $plot_w ) {
-            $canvas->createLine(
-                $ax, $scale->_plot_y_top, $ax, $scale->_plot_y_bottom,
-                -fill => C_ANCHOR, -width => 1, -dash => [ 3, 3 ],
-                -tags => [TAG],
-            );
             if ( defined $anchor_price ) {
                 my $ay = $scale->value_to_y($anchor_price);
-                my $r  = 6;   # antes 4 -- mas grande para que se note bien
+                my $r  = 6;
                 $canvas->createOval(
                     $ax - $r, $ay - $r, $ax + $r, $ay + $r,
                     -fill => C_ANCHOR, -outline => '#ffffff', -width => 2,
                     -tags => [TAG],
                 );
+                $canvas->createText(
+                    $ax + 4, $ay - 12,
+                    -text => 'AVP', -anchor => 'w', -fill => C_ANCHOR,
+                    -font => 'TkDefaultFont 7 bold', -tags => [ TAG, TAG_LABELS ],
+                );
             }
-            $canvas->createText(
-                $ax + 4, $scale->_plot_y_top + 10,
-                -text => 'AVP', -anchor => 'w', -fill => C_ANCHOR,
-                -font => 'TkDefaultFont 7 bold', -tags => [ TAG, TAG_LABELS ],
-            );
         }
     }
 

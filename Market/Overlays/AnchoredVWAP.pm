@@ -51,18 +51,13 @@ sub render {
     my $view_from = $off;
     my $view_to   = $off + $vb;
 
-    # --- Marca vertical del ancla + puntito en el precio de ancla ---
+    # --- Punto Precio de ancla ---
     my $anchor_idx   = $series->{anchor_index};
     my $anchor_price = $series->{anchor_price};
     if ( defined $anchor_idx ) {
         my $ax = $scale->index_to_center_x($anchor_idx);
         my $plot_w = $scale->_plot_w;
         if ( $ax >= 0 && $ax <= $plot_w ) {
-            $canvas->createLine(
-                $ax, $scale->_plot_y_top, $ax, $scale->_plot_y_bottom,
-                -fill => C_ANCHOR, -width => 1, -dash => [ 3, 3 ],
-                -tags => [TAG],
-            );
             if ( defined $anchor_price ) {
                 my $ay = $scale->value_to_y($anchor_price);
                 my $r  = 6;
